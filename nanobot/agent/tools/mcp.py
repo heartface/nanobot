@@ -545,6 +545,33 @@ class _MCPWrapperBase(Tool):
     def set_reconnect_handler(self, reconnect: _ReconnectCallback) -> None:
         self._reconnect = reconnect
 
+    async def _refresh_session_after_timeout(self, capability_kind: str) -> None:
+        # A server can drop a streamable HTTP session without telling the client,
+        # leaving every request on it to hang. Reconnect so the next call works;
+        # do not retry this one, since the server may still have run it.
+        if self._reconnect is None:
+            return
+        logger.warning(
+            "MCP {} '{}' timed out; reconnecting server '{}' for later calls",
+            capability_kind,
+            self._name,
+            self._server_name,
+        )
+        try:
+            refreshed_tool = await self._reconnect(self._server_name, self._name, self)
+        except Exception as exc:
+            logger.warning(
+                "MCP {} '{}' could not reconnect server '{}' after timeout: {}",
+                capability_kind,
+                self._name,
+                self._server_name,
+                type(exc).__name__,
+            )
+            return
+        refreshed_session = getattr(refreshed_tool, "_session", None)
+        if refreshed_session is not None:
+            self._session = refreshed_session
+
     async def _refresh_session_after_termination(
         self,
         exc: BaseException,
@@ -665,6 +692,7 @@ class MCPToolWrapper(_MCPWrapperBase):
                 logger.warning(
                     "MCP tool '{}' timed out after {}s", self._name, self._tool_timeout
                 )
+                await self._refresh_session_after_timeout("tool")
                 return ToolResult.error(
                     f"(MCP tool call timed out after {self._tool_timeout}s)"
                 )
@@ -837,6 +865,7 @@ class MCPResourceWrapper(_MCPWrapperBase):
                 logger.warning(
                     "MCP resource '{}' timed out after {}s", self._name, self._resource_timeout
                 )
+                await self._refresh_session_after_timeout("resource")
                 return f"(MCP resource read timed out after {self._resource_timeout}s)"
             except asyncio.CancelledError:
                 if task_is_cancelling():
@@ -956,6 +985,7 @@ class MCPPromptWrapper(_MCPWrapperBase):
                 logger.warning(
                     "MCP prompt '{}' timed out after {}s", self._name, self._prompt_timeout
                 )
+                await self._refresh_session_after_timeout("prompt")
                 return f"(MCP prompt call timed out after {self._prompt_timeout}s)"
             except asyncio.CancelledError:
                 if task_is_cancelling():
