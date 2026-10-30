@@ -225,14 +225,33 @@ async def test_server_compaction_distinguishes_unsupported_field_from_invalid_va
     provider = AzureOpenAIProvider(api_key="fixture", api_base=url, default_model="gpt-5.4")
     invoke = provider.chat_stream if stream else provider.chat
     context = ProviderCallContext(context_window_tokens=200_000)
+    tools = [ExecSessionTool().to_schema()]
+    messages = [
+        {"role": "system", "content": "Stable instructions."},
+        {"role": "user", "content": "Check the running command."},
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "call_fixture", "type": "function", "function": {
+                "name": "exec_session", "arguments": '{"session_id":"fixture"}',
+            },
+        }]},
+        {"role": "tool", "tool_call_id": "call_fixture", "content": "Command completed."},
+    ]
     try:
-        result = await invoke([{"role": "user", "content": "hello"}], provider_context=context)
+        result = await invoke(messages, tools=tools, provider_context=context)
         assert result.finish_reason == ("stop" if unsupported else "error")
         assert len(bodies) == (2 if unsupported else 1)
         assert provider.supports_native_compaction() is (not unsupported)
-        result = await invoke([{"role": "user", "content": "hello again"}], provider_context=context)
+        if unsupported:
+            without_compaction = {key: value for key, value in bodies[0].items() if key != "context_management"}
+            assert json.dumps(bodies[1]) == json.dumps(without_compaction)
+        result = await invoke(messages, tools=tools, provider_context=context)
         assert result.content == "ok"
         assert "context_management" in bodies[0]
         assert ("context_management" in bodies[-1]) is (not unsupported)
+        assert json.dumps(bodies[-1]) == json.dumps(bodies[-2] if unsupported else bodies[0])
+        assert bodies[-1]["instructions"] == "Stable instructions."
+        assert bodies[-1]["input"][0]["role"] == "user"
+        assert [item["type"] for item in bodies[-1]["input"][1:]] == ["function_call", "function_call_output"]
+        assert bodies[-1]["tools"][0]["name"] == "exec_session"
     finally:
         await provider.aclose()
