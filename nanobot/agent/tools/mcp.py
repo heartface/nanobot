@@ -558,6 +558,33 @@ class _MCPWrapperBase(Tool):
         self._session = refreshed_session
         return True
 
+    async def _refresh_session_after_timeout(self, capability_kind: str) -> None:
+        # A server can drop a streamable HTTP session without telling the client,
+        # leaving every request on it to hang. Reconnect so the next call works;
+        # do not retry this one, since the server may still have run it.
+        if self._reconnect is None:
+            return
+        logger.warning(
+            "MCP {} '{}' timed out; reconnecting server '{}' for later calls",
+            capability_kind,
+            self._name,
+            self._server_name,
+        )
+        try:
+            refreshed_tool = await self._reconnect(self._server_name, self._name, self)
+        except Exception as exc:
+            logger.warning(
+                "MCP {} '{}' could not reconnect server '{}' after timeout: {}",
+                capability_kind,
+                self._name,
+                self._server_name,
+                type(exc).__name__,
+            )
+            return
+        refreshed_session = getattr(refreshed_tool, "_session", None)
+        if refreshed_session is not None:
+            self._session = refreshed_session
+
     async def _request_with_recovery(
         self,
         request: Callable[[], Awaitable[_MCPResultT]],
@@ -576,6 +603,7 @@ class _MCPWrapperBase(Tool):
                 logger.warning(
                     "MCP {} '{}' timed out after {}s", capability_kind, self._name, timeout
                 )
+                await self._refresh_session_after_timeout(capability_kind)
                 return ToolResult.error(f"(MCP {operation} timed out after {timeout}s)")
             except asyncio.CancelledError:
                 # MCP SDK cancel scopes can leak cancellation without cancelling our task.
