@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from nanobot.config.schema import (
@@ -10,10 +11,12 @@ from nanobot.config.schema import (
     InlineFallbackConfig,
     ModelPresetConfig,
     ProviderConfig,
+    RequestOverrides,
 )
 from nanobot.providers.base import GenerationSettings, LLMProvider
 from nanobot.providers.fallback_provider import FallbackProvider
 from nanobot.providers.registry import ProviderSpec, find_by_name
+from nanobot.providers.request_overrides import apply_request_overrides
 from nanobot.providers.routing import resolve_automatic_model_api as resolve_automatic_model_api
 from nanobot.providers.routing import resolve_model_api as resolve_model_api
 from nanobot.providers.routing import resolve_provider_route
@@ -45,6 +48,8 @@ def _provider_extra_headers(
 ) -> dict[str, str] | None:
     headers = dict(spec.default_extra_headers) if spec else {}
     if provider_config and provider_config.extra_headers:
+        names = {key.lower() for key in provider_config.extra_headers}
+        headers = {key: value for key, value in headers.items() if key.lower() not in names}
         headers.update(provider_config.extra_headers)
     return headers or None
 
@@ -66,13 +71,14 @@ def _make_provider_core(
     p = setup.provider_config
     spec = setup.spec
     backend = setup.backend
+    proxy = config.network.resolve_proxy(p.use_proxy) if p else None
 
     if backend == "openai_codex":
         from nanobot.providers.openai_codex_provider import OpenAICodexProvider
 
         provider = OpenAICodexProvider(
             default_model=model,
-            proxy=getattr(p, "proxy", None) if p else None,
+            proxy=proxy,
             extra_body=p.extra_body if p else None,
             provider_name=provider_name,
         )
@@ -81,7 +87,7 @@ def _make_provider_core(
 
         provider = XAIGrokProvider(
             default_model=model,
-            proxy=getattr(p, "proxy", None) if p else None,
+            proxy=proxy,
             extra_body=p.extra_body if p else None,
             provider_name=provider_name,
         )
@@ -117,7 +123,7 @@ def _make_provider_core(
             extra_headers=_provider_extra_headers(spec, p),
             extra_body=p.extra_body if p else None,
             extra_query=p.extra_query if p else None,
-            proxy=p.proxy if p else None,
+            proxy=proxy,
             spec=custom_spec,
             provider_name=provider_name,
         )
@@ -145,7 +151,7 @@ def _make_provider_core(
             extra_body=p.extra_body if p else None,
             model_api=setup.model_api,
             extra_query=p.extra_query if p else None,
-            proxy=p.proxy if p else None,
+            proxy=proxy,
             provider_name=provider_name,
         )
 
@@ -171,6 +177,9 @@ def _inline_fallback_preset(
         ),
         reasoning_effort=fallback.reasoning_effort,
         api=fallback.api,
+        extra_headers=fallback.extra_headers,
+        extra_query=fallback.extra_query,
+        extra_body=fallback.extra_body,
     )
 
 
@@ -216,7 +225,7 @@ def make_provider(
 
 
 def build_unconfigured_provider_snapshot(config: Config, setup_error: str) -> ProviderSnapshot:
-    """Build a non-networking runtime so the WebUI can collect first-time setup."""
+    """Build a non-networking runtime while provider/model setup is incomplete."""
     from nanobot.providers.unconfigured_provider import UnconfiguredProvider
 
     preset = config.resolve_preset()
@@ -234,7 +243,9 @@ def build_unconfigured_provider_snapshot(config: Config, setup_error: str) -> Pr
 def _preset_provider_signature(
     config: Config, preset: ModelPresetConfig,
 ) -> tuple[object, ...]:
-    provider_config = config.get_provider(preset.model, preset=preset)
+    provider_config = apply_request_overrides(
+        config.get_provider(preset.model, preset=preset), preset,
+    )
     provider_name = config.get_provider_name(preset.model, preset=preset)
     return (
         preset.model,
@@ -253,7 +264,7 @@ def _preset_provider_signature(
         preset.reasoning_effort,
         preset.context_window_tokens,
         preset.api.model_dump_json() if preset.api is not None else None,
-        getattr(provider_config, "proxy", None) if provider_config else None,
+        config.network.resolve_proxy(provider_config.use_proxy) if provider_config else None,
         provider_config.thinking_style if provider_config else None,
     )
 
@@ -301,6 +312,30 @@ def build_provider_snapshot(
         generation=resolved.to_generation_settings(),
         model_preset=selected_preset,
     )
+
+
+def provider_override_declarations(
+    config: Config, *, preset: ModelPresetConfig,
+) -> tuple[tuple[bool, ...], ...]:
+    """Distinguish input restrictions hidden by merged wire settings, including lazy fallbacks."""
+    return tuple(
+        tuple(bool(getattr(item, field)) for field in RequestOverrides.model_fields)
+        for item in [preset, *_resolve_fallback_presets(config, preset)]
+    )
+
+
+def build_isolated_provider_snapshot(
+    config: Config, *, preset: ModelPresetConfig,
+) -> ProviderSnapshot:
+    """Capture SDK override inputs, including credentials used by lazy fallback clients."""
+    owned = config.model_copy(deep=True)
+    resolved = preset.model_copy(deep=True)
+    chain = [resolved, *_resolve_fallback_presets(owned, resolved)]
+    if any((provider := owned.get_provider(preset=item)) and provider.use_proxy for item in chain):
+        owned.network.proxy = owned.network.resolve_proxy(True)
+    snapshot = build_provider_snapshot(owned, preset=resolved)
+    # Runtime metadata must not alias the inputs captured by the fallback factory.
+    return replace(snapshot, signature=deepcopy(snapshot.signature))
 
 
 def load_provider_snapshot(

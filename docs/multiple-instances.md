@@ -2,6 +2,10 @@
 
 Use a separate home directory for each instance. Place `--home` before the subcommand; without it, nanobot uses `~/.nanobot`.
 
+Use this for separate clients, users, or personal/work agents that need independent configuration and long-term memory. A new topic or a different project folder inside one instance does not provide that separation.
+
+Separate homes and workspaces separate stored application data; they do not create an operating-system security boundary. Processes running as the same OS user may still access each other's files through unrestricted tools. For mutually untrusted users, use separate OS accounts or containers with separate mounts and credentials, and configure [tool restrictions](./configuration.md#security) for each instance.
+
 ## Quick Start
 
 ```bash
@@ -9,7 +13,7 @@ nanobot --home ~/.nanobot-work onboard
 nanobot --home ~/.nanobot-work webui --port 8766 --gateway-port 18791
 ```
 
-Configure this instance's models and channels in WebUI Settings or `~/.nanobot-work/config.json`. Onboarding saves its default workspace as `~/.nanobot-work/workspace`.
+Configure this instance's models in **Settings → Models** and chat apps through **Channels** in the sidebar. Onboarding saves its default workspace as `~/.nanobot-work/workspace`. Use the collapsed examples in the [configuration reference](./configuration.md) for deployment-managed JSON.
 
 Use the same home for other commands:
 
@@ -32,7 +36,7 @@ Concurrent instances need distinct gateway health ports and WebUI/channel ports.
 | Memory, skills, cron jobs | Under the workspace |
 | CLI input history | `<home>/history/cli_history` |
 
-An explicit `--config` also selects the runtime data directory. Keep each config in its own directory and use separate workspaces to isolate memory, skills, and sessions. Selecting a home does not relocate paths saved in an existing config.
+An explicit `--config` also selects the runtime data directory. Keep each config in its own directory and use separate workspaces to isolate memory, skills, and sessions. A new home gets its own config and default workspace; existing paths saved in a config remain unchanged when you select a different `--home`. Check which paths this instance will use with `nanobot --home ~/.nanobot-work status`. Selecting a home does not move or rewrite paths saved in an existing config.
 
 For custom config/workspace locations:
 

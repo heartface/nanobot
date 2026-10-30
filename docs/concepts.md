@@ -10,14 +10,14 @@ nanobot has one small core loop and several ways to enter it:
 
 | Part | What it does |
 |---|---|
-| Agent loop | Builds context, selects the session, calls the provider, runs tools, and publishes replies |
+| Agent | Takes an incoming message, chooses the conversation and model, uses enabled tools when needed, and prepares a reply |
 | Providers | LLM backends such as OpenRouter, Anthropic, OpenAI, Bedrock, Ollama, vLLM, and other OpenAI-compatible APIs |
 | Channels | User-facing transports such as CLI, WebUI/WebSocket, Telegram, Discord, Slack, Feishu, WeChat, Email, Mattermost, and others |
 | Tools | Capabilities the model may call, including files, shell, web search/fetch, MCP, cron, image generation, and subagents |
 | Memory | Workspace files and session history that keep useful context across turns |
 | Gateway | Long-running process that connects enabled channels and serves the health endpoint |
 
-The simplest path is `nanobot agent -m "Hello!"`: one inbound message goes through the agent loop and prints the reply in your terminal. The long-running path is `nanobot gateway`: channels receive messages from chat apps or the WebUI, publish them to the same agent loop, and send replies back to the originating channel.
+To test nanobot once, run `nanobot agent -m "Hello!"`; it prints a reply in your terminal. To keep nanobot running, start `nanobot gateway`. It receives messages from enabled chat apps or the WebUI and sends replies back to the same conversation.
 
 ## Config vs Workspace
 
@@ -62,11 +62,10 @@ Most examples are partial snippets. Merge them into the existing file created by
 
 A normal turn follows this flow:
 
-1. A channel receives a user message and publishes it to the message bus.
-2. The agent loop chooses a session key and builds context from the effective project workspace, agent-owned profile/skills/memory, recent messages, channel metadata, and runtime settings.
-3. The provider receives the model request.
-4. If the model asks for tools, the runner executes them and feeds results back to the model.
-5. The final reply is saved to the session and sent back through the channel.
+1. The CLI, WebUI, or a connected chat app receives your message.
+2. nanobot uses the conversation's history and the files available to that chat to prepare the request.
+3. Your selected AI service generates a response. If it needs an enabled tool, nanobot runs that tool and returns the result to the model.
+4. nanobot saves the reply in the conversation and shows or sends it through the same app or channel.
 
 That flow is the same whether the message starts in the CLI, WebUI, Telegram, Discord, or another channel.
 
@@ -84,6 +83,8 @@ The WebUI launcher is the normal browser entry point. Underneath, the gateway ke
 
 ## Provider and Model Selection
 
+Choose and configure the primary model in **Settings → Models**, then select its preset in the chat composer. The config-file example below is an alternative for deployment-managed settings.
+
 The active model should normally come from a named `modelPresets` entry selected by `agents.defaults.modelPreset`. Direct `agents.defaults.provider` and `agents.defaults.model` still form the implicit `default` preset for older or minimal configs. The active provider is resolved in this order:
 
 1. If the active preset provider or implicit default provider is not `"auto"`, nanobot uses that provider.
@@ -91,6 +92,9 @@ The active model should normally come from a named `modelPresets` entry selected
 3. OAuth providers such as OpenAI Codex and GitHub Copilot require explicit login and explicit provider/model selection inside the active preset.
 
 Pin the provider inside the preset when setting up for the first time. It is easier to debug:
+
+<details>
+<summary>Manual configuration</summary>
 
 ```json
 {
@@ -108,6 +112,8 @@ Pin the provider inside the preset when setting up for the first time. It is eas
 }
 ```
 
+</details>
+
 See [`providers.md`](./providers.md) for practical examples and [`configuration.md#providers`](./configuration.md#providers) for the full provider reference.
 
 ## Channels and Sessions
@@ -122,7 +128,7 @@ nanobot uses two related stores:
 
 | Store | Location | Purpose |
 |---|---|---|
-| Sessions | `<config-dir>/sessions/<workspace-id>/*.jsonl` | Recent conversation turns replayed into context |
+| Sessions | `<config-dir>/sessions/<workspace-id>/sessions.sqlite3` | Recent conversation turns replayed into context |
 | Memory | `<workspace>/memory/MEMORY.md` and `<workspace>/memory/history.jsonl` | Long-term facts and consolidated history |
 
 Dream is a periodic consolidation job. It reads accumulated history and updates workspace memory so useful context can survive beyond short session replay.
@@ -133,7 +139,7 @@ See [`memory.md`](./memory.md) for the detailed design.
 
 ## Apps and Agent Plugins
 
-Agent Plugins are nanobot's common package and activation boundary for installable capabilities. They organize existing extension types instead of replacing them:
+Agent Plugins are installable packages that help you add and manage capabilities in nanobot. A package can include one or more of these:
 
 | Part | Role |
 |---|---|
@@ -147,7 +153,7 @@ Native providers, channels, built-in tools, standalone workspace skills, and dir
 
 ## Tools and Safety
 
-Tools are discovered automatically from built-in modules and plugin entry points. Common tool groups include:
+nanobot can use built-in tools and tools enabled through Apps. Common tool groups include:
 
 - file read/write/edit and patching;
 - shell execution with configurable sandboxing;

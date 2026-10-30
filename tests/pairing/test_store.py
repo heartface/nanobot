@@ -57,6 +57,55 @@ class TestGenerateCode:
         assert store.approve_code(code2) is None
 
 
+class TestDelivery:
+    def test_failed_reply_can_retry_without_replacing_code_or_approving(self):
+        code = store.generate_code("feishu", "alice")
+        assert "delivery_status" not in store.list_pending()[0]
+        store.record_delivery(code, "sending")
+        assert store.list_pending()[0]["delivery_status"] == "sending"
+        store.record_delivery(code, "failed")
+        assert store.list_pending()[0]["delivery_status"] == "failed"
+        assert store.generate_code("feishu", "alice") == code
+        store.record_delivery(code, "sent")
+        store.record_delivery(code, "failed")
+        assert store.list_pending()[0]["delivery_status"] == "sent"
+        assert not store.is_approved("feishu", "alice")
+
+    @pytest.mark.parametrize("action", [store.approve_code, store.deny_code])
+    def test_late_delivery_does_not_revive_removed_request(self, action):
+        code = store.generate_code("feishu", "alice")
+        action(code)
+        store.record_delivery(code, "sent")
+        assert store.list_pending() == []
+
+    def test_expired_reply_is_not_revived(self, monkeypatch):
+        monkeypatch.setattr(store.time, "time", lambda: 1000)
+        code = store.generate_code("feishu", "alice", ttl=10)
+        monkeypatch.setattr(store.time, "time", lambda: 1011)
+        store.record_delivery(code, "sent")
+        assert store.list_pending() == []
+        assert store.approve_code(code) is None
+
+    def test_old_records_remain_usable(self):
+        code = store.generate_code("feishu", "alice")
+        data = store._load()
+        data["pending"][code].pop("delivery_status", None)
+        store._save(data)
+        assert "delivery_status" not in store.list_pending()[0]
+        store.record_delivery(code, "sent")
+        assert store.approve_code(code) == ("feishu", "alice")
+
+    def test_bookkeeping_failure_preserves_store(self, monkeypatch):
+        code = store.generate_code("feishu", "alice")
+        before = store._store_path().read_bytes()
+        with monkeypatch.context() as m:
+            def fail(_data):
+                raise OSError("disk unavailable")
+            m.setattr(store, "_save", fail)
+            store.record_delivery(code, "sent")
+        assert store._store_path().read_bytes() == before
+
+
 class TestFormatPairingReply:
     def test_points_owner_to_webui_with_command_fallback(self) -> None:
         reply = store.format_pairing_reply("ABCD-EFGH")
@@ -392,3 +441,75 @@ class TestTransientReadFailure:
 
         assert "unavailable" in reply.lower()
         assert store.approve_code(code) == ("telegram", "123")
+
+
+class TestChangeNotifications:
+    def test_changes_are_committed_and_unlocked_before_notification(self):
+        snapshots = []
+
+        def changed():
+            unlocked = store._LOCK.acquire(blocking=False)
+            if unlocked:
+                store._LOCK.release()
+                snapshots.append(store.list_pending())
+
+        code = store.generate_code("telegram", "alice", on_change=changed)
+        assert len(snapshots) == 1 and snapshots[-1][0]["code"] == code
+        assert store.generate_code("telegram", "alice", on_change=changed) == code
+        assert len(snapshots) == 1
+        store.record_delivery(code, "sending", on_change=changed)
+        assert snapshots[-1][0]["delivery_status"] == "sending"
+        store.record_delivery(code, "sending", on_change=changed)
+        assert len(snapshots) == 2
+        store.record_delivery(code, "sent", on_change=changed)
+        store.record_delivery(code, "failed", on_change=changed)
+        assert len(snapshots) == 3 and snapshots[-1][0]["delivery_status"] == "sent"
+        assert store.approve_code(code, on_change=changed) == ("telegram", "alice")
+        assert snapshots[-1] == [] and len(snapshots) == 4
+        assert store.approve_code(code, on_change=changed) is None
+        assert not store.deny_code(code, on_change=changed)
+        assert len(snapshots) == 4
+
+    def test_commands_notify_only_after_changes(self):
+        changes = []
+
+        def changed():
+            changes.append(json.loads(store._store_path().read_text()))
+
+        code = store.generate_code("telegram", "alice")
+        assert "Approved" in store.handle_pairing_command("cli", f"approve {code}", on_change=changed)
+        assert changes[-1]["approved"] == {"telegram": ["alice"]}
+        store.handle_pairing_command("cli", "list", on_change=changed)
+        store.handle_pairing_command("cli", "approve invalid", on_change=changed)
+        assert len(changes) == 1
+        store.handle_pairing_command("cli", "revoke telegram alice", on_change=changed)
+        store.handle_pairing_command("cli", "revoke telegram alice", on_change=changed)
+        code = store.generate_code("telegram", "bob")
+        store.handle_pairing_command("cli", f"deny {code}", on_change=changed)
+        code = store.generate_code("telegram", "carol")
+        store.handle_pairing_command("cli", f"approve {code}", on_change=changed)
+        store.handle_pairing_command("cli", "revoke telegram carol", on_change=changed)
+        assert len(changes) == 5 and changes[-1] == {"approved": {}, "pending": {}}
+
+    def test_failed_persistence_does_not_notify(self, monkeypatch):
+        code = store.generate_code("telegram", "alice")
+        before = store._store_path().read_bytes()
+        changes = []
+
+        def failed_write(_data):
+            raise OSError("fixture disk failure")
+
+        monkeypatch.setattr(store, "_save", failed_write)
+        with pytest.raises(OSError, match="disk failure"):
+            store.generate_code("telegram", "bob", on_change=lambda: changes.append(True))
+        store.record_delivery(code, "sent", on_change=lambda: changes.append(True))
+        assert changes == [] and store._store_path().read_bytes() == before
+
+    def test_notification_failure_does_not_report_persisted_mutation_as_failure(self):
+        def failed_notify():
+            raise RuntimeError("fixture observer failure")
+
+        code = store.generate_code("telegram", "alice", on_change=failed_notify)
+        assert store.list_pending()[0]["code"] == code
+        assert store.approve_code(code, on_change=failed_notify) == ("telegram", "alice")
+        assert store.is_approved("telegram", "alice")

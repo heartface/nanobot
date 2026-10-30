@@ -12,12 +12,13 @@ from typing import Any, cast
 
 from pydantic import Field
 
+from nanobot.bus.delivery import ChannelNotReadyError
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.outbound_events import ProgressEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.paths import get_media_dir
-from nanobot.config.schema import Base
+from nanobot.config_base import Base
 from nanobot.events import ContextCompactionEvent
 
 WECOM_AVAILABLE = importlib.util.find_spec("wecom_aibot_sdk") is not None
@@ -91,7 +92,6 @@ class WecomChannel(BaseChannel):
         self.config: WecomConfig = config
         self._client: Any = None
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()
-        self._loop: asyncio.AbstractEventLoop | None = None
         self._generate_req_id: Callable[[str], str] | None = None
         # Store frame headers for each chat to enable replies
         self._chat_frames: dict[str, Any] = {}
@@ -113,7 +113,6 @@ class WecomChannel(BaseChannel):
         from wecom_aibot_sdk import WSClient, generate_req_id
 
         self._running = True
-        self._loop = asyncio.get_running_loop()
         self._generate_req_id = generate_req_id
 
         # Create WebSocket client
@@ -416,7 +415,7 @@ class WecomChannel(BaseChannel):
         ):
             return
         if not self._client:
-            raise RuntimeError("WeCom client not initialized")
+            raise ChannelNotReadyError("WeCom client not initialized")
 
         try:
             content = (msg.content or "").strip()

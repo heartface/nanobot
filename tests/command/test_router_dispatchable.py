@@ -110,8 +110,8 @@ class TestMidTurnCommandDispatchedDirectly:
     def fake_loop(self) -> MagicMock:
         loop = MagicMock()
         loop.sessions = MagicMock()
-        loop.sessions.get_or_create = MagicMock(return_value=MagicMock(
-            messages=[], last_archived=0, clear=MagicMock(),
+        loop.sessions.state.get = AsyncMock(return_value=MagicMock(
+            key="test:chat1", messages=[], last_archived=0, clear=MagicMock(),
         ))
         loop.sessions.save = MagicMock()
         loop.sessions.invalidate = MagicMock()
@@ -137,10 +137,11 @@ class TestMidTurnCommandDispatchedDirectly:
             msg=fake_msg, session=None,
             key="test:chat1", raw="/new", loop=fake_loop,
         )
+        fake_loop.sessions.state.reset = AsyncMock()
         result = await router.dispatch(ctx)
         assert result is not None
         assert "New session" in result.content
-        fake_loop.sessions.get_or_create.assert_called_once_with("test:chat1")
+        fake_loop.sessions.state.reset.assert_awaited_once_with("test:chat1")
 
     @pytest.mark.asyncio
     async def test_help_dispatched_with_session_none(
@@ -263,7 +264,7 @@ class TestPairingCommandDispatch:
     ) -> None:
         monkeypatch.setattr(
             "nanobot.pairing.store.approve_code",
-            lambda code: ("telegram", "123") if code == "ABCD-EFGH" else None,
+            lambda code, *, on_change=None: ("telegram", "123") if code == "ABCD-EFGH" else None,
         )
         fake_msg.content = "/pairing approve ABCD-EFGH"
         ctx = CommandContext(
@@ -285,7 +286,7 @@ class TestPairingCommandDispatch:
     ) -> None:
         monkeypatch.setattr(
             "nanobot.pairing.store.revoke",
-            lambda ch, sid: sid == "123",
+            lambda ch, sid, *, on_change=None: sid == "123",
         )
         fake_msg.content = "/pairing revoke 123"
         ctx = CommandContext(

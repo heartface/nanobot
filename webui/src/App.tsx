@@ -8,17 +8,19 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { ArrowRight, ChevronDown, Eye, EyeOff, Moon, ShieldCheck, Sun, X } from "lucide-react";
+import { ArrowRight, ChevronDown, Eye, EyeOff, ShieldCheck, X } from "lucide-react";
+import { ThemeToggleIcon } from "@/components/icons/ThemeToggleIcon";
 import { Trans, useTranslation } from "react-i18next";
 import { channelUiPresentation } from "@/channel-plugins/registry";
 import { StarPrompt } from "@/components/StarPrompt";
 import { Sidebar } from "@/components/Sidebar";
-import { RemoteInstances, useRemoteConnections } from "@/components/remote/RemoteInstances";
-import { RemoteConnectionsPage } from "@/components/remote/RemoteConnectionsPage";
+import { RemoteInstances } from "@/components/remote/RemoteInstances";
+import { useRemoteConnections } from "@/components/remote/remote-context";
+import { LazyRemoteConnectionsPage } from "@/components/remote/LazyRemoteConnectionsPage";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { SidebarResizeHandle, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH } from "@/components/SidebarResizeHandle";
 import { matchSidebarShortcut } from "@/lib/sidebar-shortcuts";
-import type { SidebarDeleteItem } from "@/components/ChatList";
+import type { SidebarDeleteDecision, SidebarDeleteItem } from "@/components/ChatList";
 import type { SettingsSectionKey } from "@/components/settings/SettingsView";
 import { StartupShell } from "@/components/StartupShell";
 import { ComposerDraftStore, clearStoredComposerDrafts } from "@/lib/composer-draft";
@@ -48,6 +50,7 @@ import { floatingSurfaceElevationClassName } from "@/components/ui/floating-surf
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 
 import { useSessions } from "@/hooks/useSessions";
+import { useReconnectRuns } from "@/hooks/useReconnectRuns";
 import { useDeferredTitleRefresh } from "@/hooks/useDeferredTitleRefresh";
 import { useSidebarState } from "@/hooks/useSidebarState";
 import { useSkills } from "@/hooks/useSkills";
@@ -57,6 +60,7 @@ import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { useAppViewport } from "@/hooks/useAppViewport";
 import type { SendAttachment, SendOptions } from "@/hooks/useNanobotStream";
 import { ThemeProvider, useTheme } from "@/hooks/useTheme";
+import { useReadingTypography } from "@/hooks/useReadingTypography";
 import { logoFallbackUrls } from "@/lib/provider-brand";
 import { cn } from "@/lib/utils";
 import {
@@ -71,9 +75,12 @@ import {
 import { displayTitle, sortSessions } from "@/lib/chat-groups";
 import { deriveTitle } from "@/lib/format";
 import { NanobotClient } from "@/lib/nanobot-client";
+import { BrowserNotifications, useBrowserNotificationLifecycle } from "@/components/BrowserNotifications";
 import { ThreadMessageCache } from "@/lib/thread-message-cache";
 import { FilePreviewStore } from "@/hooks/useFilePreviewState";
 import { ClientProvider, useClient } from "@/providers/ClientProvider";
+import { useVersionCheck } from "@/providers/VersionCheckProvider";
+import { useUpdateFlow } from "@/providers/UpdateFlowProvider";
 import type {
   BootstrapResponse,
   ChatSummary,
@@ -163,32 +170,17 @@ const DeleteConfirm = lazy(async () => {
   const module = await import("@/components/DeleteConfirm");
   return { default: module.DeleteConfirm };
 });
-const RenameChatDialog = lazy(async () => {
-  const module = await import("@/components/RenameChatDialog");
-  return { default: module.RenameChatDialog };
+const RenameDialog = lazy(async () => {
+  const module = await import("@/components/RenameDialog");
+  return { default: module.RenameDialog };
 });
-
-function SurfaceLoadingFallback({ label }: { label?: string }) {
-  const { t } = useTranslation();
-  return (
-    <div
-      aria-busy="true"
-      className="flex h-full w-full flex-col gap-5 px-5 py-8 sm:px-8 lg:px-12"
-    >
-      <span className="sr-only">{label ?? t("settings.status.loading")}</span>
-      <div className="h-4 w-20 animate-pulse rounded bg-muted/70 motion-reduce:animate-none" />
-      <div className="h-9 w-48 animate-pulse rounded bg-muted/70 motion-reduce:animate-none" />
-      <div className="mt-4 h-12 w-full max-w-3xl animate-pulse rounded-md bg-muted/55 motion-reduce:animate-none" />
-      <div className="h-28 w-full max-w-3xl animate-pulse rounded-md bg-muted/40 motion-reduce:animate-none" />
-    </div>
-  );
-}
 
 const SETTINGS_SECTION_KEYS: SettingsSectionKey[] = [
   "capabilities",
   "overview",
   "about",
   "appearance",
+  "notifications",
   "models",
   "image",
   "voice",
@@ -213,6 +205,11 @@ function defaultShellRoute(): ShellRoute {
 function shellViewForSettingsSection(section: SettingsSectionKey): ShellView {
   if (section === "apps" || section === "automations" || section === "skills" || section === "channels") return section;
   return "settings";
+}
+
+function changesSettingsSurface(current: ShellRoute, next: ShellRoute): boolean {
+  return current.view !== "chat" && current.view !== "remote" &&
+    (current.view !== next.view || current.settingsSection !== next.settingsSection);
 }
 
 function fallbackRestartHash(hash: string): boolean {
@@ -617,31 +614,55 @@ function PairingCodePopup({
   busyCode: string | null;
   error: string | null;
   onApprove: (code: string) => void;
-  onDismiss: (code: string) => void;
+  onDismiss: (request: PairingRequestInfo) => void;
 }) {
   const { t } = useTranslation();
   const [value, setValue] = useState("");
+  const attemptedCode = useRef<string | null>(null);
   const normalizedCode = normalizePairingCode(value);
   const matchedRequest = useMemo(
     () => requests.find((request) => request.code === normalizedCode) ?? null,
     [normalizedCode, requests],
   );
-  const firstRequest = requests[0] ?? null;
+  // Keep delivered and legacy requests usable even when another bot cannot reply.
+  const firstRequest = requests.find((request) => (
+    !request.delivery_status || request.delivery_status === "sent"
+  )) ?? requests[0] ?? null;
   const displayRequest = matchedRequest ?? firstRequest;
-  const expires = formatPairingExpiry(firstRequest?.expires_in_seconds);
+  const deliveryBlocked = displayRequest?.delivery_status === "failed"
+    || displayRequest?.delivery_status === "sending";
+  const expires = formatPairingExpiry(displayRequest?.expires_in_seconds);
   const isCompleteCode = normalizedCode.length === 9;
   const showNoMatch = isCompleteCode && !matchedRequest && !busyCode;
 
   useEffect(() => {
-    if (!matchedRequest || busyCode) return;
+    if (!matchedRequest || busyCode || attemptedCode.current === matchedRequest.code) return;
+    attemptedCode.current = matchedRequest.code;
     onApprove(matchedRequest.code);
   }, [busyCode, matchedRequest, onApprove]);
 
   useEffect(() => {
-    if (!requests.length) setValue("");
+    if (!requests.length) {
+      setValue("");
+      attemptedCode.current = null;
+    }
   }, [requests.length]);
 
   if (!firstRequest) return null;
+
+  const codeInput = (
+    <PairingCodeSlots
+      value={value}
+      disabled={Boolean(busyCode)}
+      matched={Boolean(matchedRequest)}
+      invalid={showNoMatch}
+      ariaLabel={t("app.pairing.code", { defaultValue: "Pairing code" })}
+      onChange={(next) => {
+        attemptedCode.current = null;
+        setValue(formatPairingCodeInput(next));
+      }}
+    />
+  );
 
   return (
     <div
@@ -664,8 +685,15 @@ function PairingCodePopup({
               <p className="text-[15px] font-semibold tracking-[-0.01em]">
                 {t("app.pairing.title", { defaultValue: "Pair a chat user" })}
               </p>
-              <p className="mt-1 text-[13px] leading-5 text-muted-foreground">
-                {t("app.pairing.description", {
+              <p
+                className="mt-1 text-pretty text-[13px] leading-5 text-muted-foreground"
+                role={displayRequest.delivery_status === "failed" ? "alert" : undefined}
+              >
+                {displayRequest.delivery_status === "failed" ? t("app.pairing.deliveryFailed", {
+                  defaultValue: "Couldn't send the pairing code. Check this bot's send-message permissions and gateway logs, then send it another private message to retry.",
+                }) : displayRequest.delivery_status === "sending" ? t("app.pairing.deliverySending", {
+                  defaultValue: "Sending a pairing code to your chat. If it doesn't arrive, send the bot another private message to retry.",
+                }) : t("app.pairing.description", {
                   defaultValue: "Enter the pairing code shown in the chat.",
                 })}
               </p>
@@ -673,46 +701,52 @@ function PairingCodePopup({
             <button
               type="button"
               aria-label={t("common.close", { defaultValue: "Close" })}
-              onClick={() => onDismiss(firstRequest.code)}
+              onClick={() => onDismiss(displayRequest)}
               className="rounded-full p-1 text-muted-foreground transition hover:bg-muted hover:text-foreground"
             >
               <X className="h-4 w-4" aria-hidden />
             </button>
           </div>
 
-          <label className="mt-4 block text-[12.5px] font-medium text-foreground">
-            {t("app.pairing.code", { defaultValue: "Pairing code" })}
-          </label>
-          <PairingCodeSlots
-            value={value}
-            disabled={Boolean(busyCode)}
-            matched={Boolean(matchedRequest)}
-            invalid={showNoMatch}
-            ariaLabel={t("app.pairing.code", { defaultValue: "Pairing code" })}
-            onChange={(next) => setValue(formatPairingCodeInput(next))}
-          />
+          {deliveryBlocked ? (
+            <details className="mt-3 text-[12.5px] text-muted-foreground">
+              <summary className="cursor-pointer">
+                {t("app.pairing.haveCode", { defaultValue: "Already received a code?" })}
+              </summary>
+              {codeInput}
+            </details>
+          ) : (
+            <>
+              <label className="mt-4 block text-[12.5px] font-medium text-foreground">
+                {t("app.pairing.code", { defaultValue: "Pairing code" })}
+              </label>
+              {codeInput}
+            </>
+          )}
 
-          <div className="mt-3 flex items-center justify-between gap-3 text-[12.5px] text-muted-foreground">
-            <span>
-              {matchedRequest
-                ? t("app.pairing.matched", {
-                    defaultValue: "Matched {{channel}}. Connecting...",
-                    channel: channelLabel(matchedRequest.channel),
-                  })
-                : t("app.pairing.expiresInline", {
-                    defaultValue: "Code expires {{expires}}.",
-                    expires,
-                  })}
-            </span>
-            {total > 1 ? (
-              <span className="shrink-0">
-                {t("app.pairing.queueCount", {
-                  defaultValue: "{{count}} pending",
-                  count: total,
-                })}
+          {!deliveryBlocked || total > 1 ? (
+            <div className="mt-3 flex items-center justify-between gap-3 text-[12.5px] text-muted-foreground">
+              <span>
+                {matchedRequest && busyCode === matchedRequest.code
+                  ? t("app.pairing.matched", {
+                      defaultValue: "Matched {{channel}}. Connecting...",
+                      channel: channelLabel(matchedRequest.channel),
+                    })
+                  : deliveryBlocked ? null : t("app.pairing.expiresInline", {
+                      defaultValue: "Code expires {{expires}}.",
+                      expires,
+                    })}
               </span>
-            ) : null}
-          </div>
+              {total > 1 ? (
+                <span className="shrink-0">
+                  {t("app.pairing.queueCount", {
+                    defaultValue: "{{count}} pending",
+                    count: total,
+                  })}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
 
           {showNoMatch ? (
             <p className="mt-2 text-[12px] leading-5 text-destructive">
@@ -723,7 +757,19 @@ function PairingCodePopup({
           ) : null}
 
           {error ? (
-            <p className="mt-2 text-[12px] leading-5 text-destructive">{error}</p>
+            <div className="mt-2 space-y-2">
+              <p role="alert" className="text-[12px] leading-5 text-destructive">{error}</p>
+              {matchedRequest ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={Boolean(busyCode)}
+                  onClick={() => onApprove(matchedRequest.code)}
+                >
+                  {t("common.retry", { defaultValue: "Retry" })}
+                </Button>
+              ) : null}
+            </div>
           ) : null}
         </div>
       </div>
@@ -902,6 +948,8 @@ function resolveRuntimeSurface(
 
 export default function App() {
   useAppViewport();
+  useBrowserNotificationLifecycle();
+  useReadingTypography();
   const { t } = useTranslation();
   const [state, setState] = useState<BootState>({ status: "loading" });
   const bootstrapSecretRef = useRef("");
@@ -1099,7 +1147,9 @@ export default function App() {
       modelName={state.modelName}
       ingressLimits={state.ingressLimits}
       webuiCapabilities={state.webuiCapabilities}
+      allowUpdateFlow={state.runtimeSurface !== "native"}
     >
+      <BrowserNotifications client={state.client} />
       <RemoteInstances><Shell
         runtimeSurface={state.runtimeSurface}
         onModelNameChange={handleModelNameChange}
@@ -1123,9 +1173,11 @@ function Shell({
 }) {
   const { t, i18n } = useTranslation();
   const remoteConnections = useRemoteConnections();
+  const versionCheck = useVersionCheck();
+  const updateFlow = useUpdateFlow();
   const localActive = remoteConnections?.localActive !== false;
   const managingConnections = remoteConnections?.managing === true && !remoteConnections?.activeHostId;
-  const { theme, toggle } = useTheme();
+  const { theme, preference: themePreference, toggle, setTheme } = useTheme();
   const managementMain = useRef<HTMLElement>(null);
   const reportManagementSurface = remoteConnections?.reportManagementSurface;
   useEffect(() => {
@@ -1144,21 +1196,27 @@ function Shell({
   const remoteConnectionsRef = useRef(remoteConnections);
   remoteConnectionsRef.current = remoteConnections;
   const { client, getToken } = useClient();
+  useReconnectRuns(client, getToken);
   const {
     sessions,
     loading,
+    initialLoading: sessionsInitialLoading,
+    error: sessionsError,
     refresh,
     createChat,
     forkChat,
     deleteChat,
     getSessionAutomations,
   } = useSessions();
+  // Failed reads retain an empty list or partial reload cache, not proof of deletion.
+  const sessionsLoaded = !loading && sessionsError === null;
   const {
     state: sidebarState,
     loading: sidebarStateLoading,
     update: updateSidebarState,
+    rename: onRequestRename,
   } =
-    useSidebarState(sessions, !loading);
+    useSidebarState(sessions, sessionsLoaded);
   const initialRouteRef = useRef<ShellRoute | null>(null);
   if (!initialRouteRef.current) initialRouteRef.current = readShellRoute();
   const [activeKey, setActiveKey] = useState<string | null>(
@@ -1206,10 +1264,7 @@ function Shell({
   const [pendingDelete, setPendingDelete] = useState<{
     items: SidebarDeleteItem[];
     automations?: SessionAutomationJob[];
-  } | null>(null);
-  const [pendingRename, setPendingRename] = useState<{
-    key: string;
-    label: string;
+    onDecision?: SidebarDeleteDecision;
   } | null>(null);
   const [pendingTabRename, setPendingTabRename] = useState<{
     key: string;
@@ -1220,13 +1275,18 @@ function Shell({
     label: string;
   } | null>(null);
   const restartSawDisconnectRef = useRef(false);
+  const restartStartedAtRef = useRef(0);
   const [restartToast, setRestartToast] = useState<string | null>(null);
   const [isRestarting, setIsRestarting] = useState(false);
   const [pairingRequests, setPairingRequests] = useState<PairingRequestInfo[]>([]);
   const [pairingBusyCode, setPairingBusyCode] = useState<string | null>(null);
   const [pairingError, setPairingError] = useState<string | null>(null);
   const pairingRefreshRef = useRef<Promise<number> | null>(null);
-  const [snoozedPairingCodes, setSnoozedPairingCodes] = useState<Map<string, number>>(
+  const pairingRefreshPendingRef = useRef(false);
+  const [snoozedPairingCodes, setSnoozedPairingCodes] = useState<Map<string, {
+    until: number;
+    deliveryStatus: PairingRequestInfo["delivery_status"];
+  }>>(
     () => new Map(),
   );
   const [runningChatIds, setRunningChatIds] = useState<Set<string>>(() => new Set());
@@ -1300,33 +1360,36 @@ function Shell({
     retainedTemporaryChatIdsRef.current = retained;
   }, [temporaryChatIds, threadMessageCache, filePreviewStore, draftStore]);
 
+  const commitNavigation = useCallback((route: ShellRoute, options?: { replace?: boolean }) => {
+    // The visible sidebar always belongs to its existing host. Navigation
+    // dismisses global management without switching to a different host.
+    if (remoteConnectionsRef.current?.managing) remoteConnectionsRef.current.closeManagement();
+    setActiveKey(route.activeKey);
+    setView(route.view);
+    setSettingsInitialSection(route.settingsSection);
+    writeShellRoute({
+      ...route,
+      temporary: route.temporary || Boolean(route.activeKey && temporarySessionsRef.current[route.activeKey]),
+    }, options?.replace);
+  }, []);
   const navigate = useCallback(
     (route: ShellRoute, options?: { replace?: boolean }) => {
-      const leave = () => {
-        // The visible sidebar always belongs to its existing host. Navigation
-        // dismisses global management without switching to a different host.
-        if (remoteConnectionsRef.current?.managing) remoteConnectionsRef.current.closeManagement();
-        setActiveKey(route.activeKey);
-        setView(route.view);
-        setSettingsInitialSection(route.settingsSection);
-        writeShellRoute({
-          ...route,
-          temporary: route.temporary || Boolean(route.activeKey && temporarySessionsRef.current[route.activeKey]),
-        }, options?.replace);
-      };
-      if (currentShellRouteRef.current.view === "settings" && route.view !== "settings" && settingsExitGuardRef.current) {
-        settingsExitGuardRef.current(leave);
+      const leave = () => commitNavigation(route, options);
+      const current = currentShellRouteRef.current;
+      if (changesSettingsSurface(current, route) && settingsExitGuardRef.current) {
+        settingsExitGuardRef.current(leave, { promptRestart: current.view !== route.view });
       } else leave();
     },
-    [],
+    [commitNavigation],
   );
 
   useEffect(() => {
     const applyRoute = () => {
       const route = readShellRoute();
       if (route.view === "remote") setMobileSidebarOpen(false);
-      if (currentShellRouteRef.current.view === "settings" && route.view !== "settings" && settingsExitGuardRef.current) {
-        writeShellRoute(currentShellRouteRef.current, true);
+      const current = currentShellRouteRef.current;
+      if (changesSettingsSurface(current, route) && settingsExitGuardRef.current) {
+        writeShellRoute(current, true);
         settingsExitGuardRef.current(() => {
           setActiveKey(route.activeKey);
           setView(route.view);
@@ -1334,7 +1397,7 @@ function Shell({
           writeShellRoute(route, true);
           setWorkspaceError(null);
           if (route.view === "chat" && !route.activeKey) setDraftWorkspaceScope(null);
-        });
+        }, { promptRestart: current.view !== route.view });
         return;
       }
       setActiveKey(route.activeKey);
@@ -1412,30 +1475,41 @@ function Shell({
   }, [updatedChatIds]);
 
   const refreshPairingRequests = useCallback((): Promise<number> => {
-    if (pairingRefreshRef.current) return pairingRefreshRef.current;
+    if (pairingRefreshRef.current) {
+      // An earlier snapshot may predate the notice or completed mutation.
+      pairingRefreshPendingRef.current = true;
+      return pairingRefreshRef.current;
+    }
 
     const request = (async () => {
-      try {
-        const payload = await fetchPairingRequests(getToken());
-        const requests = Array.isArray(payload.requests) ? payload.requests : [];
-        setPairingRequests(requests);
-        setSnoozedPairingCodes((current) => {
-          if (current.size === 0) return current;
-          const activeCodes = new Set(requests.map((request) => request.code));
-          const now = Date.now();
-          const next = new Map(
-            Array.from(current).filter(
-              ([code, snoozedUntil]) => activeCodes.has(code) && snoozedUntil > now,
-            ),
-          );
-          return next.size === current.size ? current : next;
-        });
-        return requests.length;
-      } catch {
-        // Pairing is an opportunistic WebUI affordance. The slash command path
-        // remains available if this polling request fails.
-        return 0;
-      }
+      let requestCount: number;
+      do {
+        pairingRefreshPendingRef.current = false;
+        try {
+          const payload = await fetchPairingRequests(getToken());
+          const requests = Array.isArray(payload.requests) ? payload.requests : [];
+          setPairingRequests(requests);
+          setSnoozedPairingCodes((current) => {
+            if (current.size === 0) return current;
+            const activeRequests = new Map(requests.map((request) => [request.code, request]));
+            const now = Date.now();
+            const next = new Map(
+              Array.from(current).filter(
+                ([code, snooze]) => activeRequests.has(code)
+                  && snooze.until > now
+                  && activeRequests.get(code)?.delivery_status === snooze.deliveryStatus,
+              ),
+            );
+            return next.size === current.size ? current : next;
+          });
+          requestCount = requests.length;
+        } catch {
+          // Pairing is an opportunistic WebUI affordance. The slash command path
+          // remains available if this polling request fails.
+          requestCount = 0;
+        }
+      } while (pairingRefreshPendingRef.current);
+      return requestCount;
     })();
     const clearRequest = () => {
       if (pairingRefreshRef.current === request) pairingRefreshRef.current = null;
@@ -1453,17 +1527,24 @@ function Shell({
     const poll = async () => {
       const requestCount = await refreshPairingRequests();
       if (disposed) return;
+      if (timer !== null) window.clearTimeout(timer);
       timer = window.setTimeout(
         () => void poll(),
         requestCount > 0 ? PAIRING_POLL_INTERVAL_MS : PAIRING_IDLE_POLL_INTERVAL_MS,
       );
     };
+    const requestRefresh = () => { void poll(); };
+    const unsubscribePairing = client.onPairingChange(requestRefresh);
+    const unsubscribeReady = client.onReady(requestRefresh);
     void poll();
     return () => {
       disposed = true;
+      pairingRefreshPendingRef.current = false;
       if (timer !== null) window.clearTimeout(timer);
+      unsubscribePairing();
+      unsubscribeReady();
     };
-  }, [pageVisible, refreshPairingRequests]);
+  }, [client, pageVisible, refreshPairingRequests]);
 
   const activeSession = useMemo<ChatSummary | null>(() => {
     if (!activeKey) return null;
@@ -1541,7 +1622,7 @@ function Shell({
   }, [refreshWorkspaces]);
 
   useEffect(() => {
-    if (loading) return;
+    if (!sessionsLoaded) return;
     const knownChatIds = new Set(sessions.map((session) => session.chatId));
     setUpdatedChatIds((current) => {
       const next = new Set(
@@ -1553,16 +1634,16 @@ function Shell({
       const entries = Object.entries(current).filter(([chatId]) => knownChatIds.has(chatId));
       return entries.length === Object.keys(current).length ? current : Object.fromEntries(entries);
     });
-  }, [loading, sessions]);
+  }, [sessionsLoaded, sessions]);
 
   useEffect(() => {
-    if (loading || sidebarStateLoading) return;
+    if (!sessionsLoaded || sidebarStateLoading) return;
     const validKeys = new Set(sessions.map((session) => session.key));
     updateWorkbenchState((current) => {
       return reconcileWorkbench(current, validKeys);
     });
   }, [
-    loading,
+    sessionsLoaded,
     sidebarStateLoading,
     sessions,
     updateWorkbenchState,
@@ -1644,25 +1725,6 @@ function Shell({
     for (const chatId of activeRunIds) {
       client.attach(chatId);
     }
-    setRunningChatIds((current) => {
-      let changed = false;
-      const next = new Set(current);
-      for (const chatId of activeRunIds) {
-        if (!next.has(chatId)) changed = true;
-        next.add(chatId);
-      }
-      if (!changed) return current;
-      runningChatIdsRef.current = next;
-      return next;
-    });
-    setUpdatedChatIds((current) => {
-      let changed = false;
-      const next = new Set(current);
-      for (const chatId of activeRunIds) {
-        if (next.delete(chatId)) changed = true;
-      }
-      return changed ? next : current;
-    });
   }, [client, loading, sessions]);
 
   const openHostSidebar = useCallback(() => {
@@ -1941,32 +2003,6 @@ function Shell({
     [updateSidebarState],
   );
 
-  const onRequestRename = useCallback((key: string, label: string) => {
-    setPendingRename({ key, label });
-  }, []);
-
-  const onConfirmRename = useCallback(
-    (title: string) => {
-      if (!pendingRename) return;
-      const key = pendingRename.key;
-      setPendingRename(null);
-      void updateSidebarState((current) => {
-        const titleOverrides = { ...current.title_overrides };
-        const cleaned = title.trim();
-        if (cleaned) {
-          titleOverrides[key] = cleaned;
-        } else {
-          delete titleOverrides[key];
-        }
-        return {
-          ...current,
-          title_overrides: titleOverrides,
-        };
-      });
-    },
-    [pendingRename, updateSidebarState],
-  );
-
   const onRequestRenameTab = useCallback((key: string, label: string) => {
     setPendingTabRename({ key, label });
   }, []);
@@ -2034,24 +2070,23 @@ function Shell({
     [pendingProjectRename, updateSidebarState],
   );
 
-  const onToggleArchive = useCallback(
-    (key: string) => {
+  const onArchiveMany = useCallback(
+    (keys: string[], archive: boolean) => {
+      const selected = new Set(keys);
       void updateSidebarState((current) => {
         const archived = new Set(current.archived_keys);
-        const pinned = current.pinned_keys.filter((item) => item !== key);
-        if (archived.has(key)) {
-          archived.delete(key);
-        } else {
-          archived.add(key);
+        for (const key of selected) {
+          if (archive) archived.add(key);
+          else archived.delete(key);
         }
         return {
           ...current,
-          pinned_keys: pinned,
+          pinned_keys: current.pinned_keys.filter((key) => !selected.has(key)),
           archived_keys: Array.from(archived),
         };
       });
-      if (activeKey === key && !sidebarState.archived_keys.includes(key)) {
-        const archived = new Set([...sidebarState.archived_keys, key]);
+      if (archive && activeKey && selected.has(activeKey)) {
+        const archived = new Set([...sidebarState.archived_keys, ...selected]);
         const next = topicSessions.find((session) => !archived.has(session.key));
         navigate({
           view: "chat",
@@ -2062,6 +2097,10 @@ function Shell({
     },
     [activeKey, navigate, sidebarState.archived_keys, topicSessions, updateSidebarState],
   );
+
+  const onToggleArchive = useCallback((key: string) => {
+    onArchiveMany([key], !sidebarState.archived_keys.includes(key));
+  }, [onArchiveMany, sidebarState.archived_keys]);
 
   const onToggleArchived = useCallback(() => {
     void updateSidebarState((current) => ({
@@ -2191,13 +2230,12 @@ function Shell({
 
   const onSettingsSectionChange = useCallback(
     (section: SettingsSectionKey) => {
-      navigate({
-        view: shellViewForSettingsSection(section),
-        activeKey,
-        settingsSection: section,
-      });
+      const route = { view: shellViewForSettingsSection(section), activeKey, settingsSection: section };
+      // The page has completed or retained its outgoing drafts for in-page transitions.
+      if (currentShellRouteRef.current.view === route.view) commitNavigation(route);
+      else navigate(route);
     },
-    [activeKey, navigate],
+    [activeKey, commitNavigation, navigate],
   );
 
   const onBackToChat = useCallback(() => {
@@ -2220,10 +2258,11 @@ function Shell({
     const chatId = activeSession?.chatId ?? client.defaultChatId;
     if (!chatId) return;
     restartSawDisconnectRef.current = false;
+    restartStartedAtRef.current = Date.now();
     setIsRestarting(true);
     rememberRestartRoute();
     try {
-      window.localStorage.setItem(RESTART_STARTED_KEY, String(Date.now()));
+      window.localStorage.setItem(RESTART_STARTED_KEY, String(restartStartedAtRef.current));
     } catch {
       // ignore storage errors
     }
@@ -2237,8 +2276,8 @@ function Shell({
   }, [client, onModelNameChange]);
 
   useEffect(() => {
-    return client.onRunStatus((chatId, startedAt) => {
-      if (startedAt != null) {
+    return client.onRunStatus((chatId, state) => {
+      if (state.active) {
         const nextRunning = new Set(runningChatIdsRef.current);
         nextRunning.add(chatId);
         runningChatIdsRef.current = nextRunning;
@@ -2309,7 +2348,8 @@ function Shell({
         });
     };
     const unsubscribe = client.onStatus((status) => {
-      const startedAt = (() => {
+      // Another tab can consume the reload marker before this tab reconnects.
+      const startedAt = restartStartedAtRef.current || (() => {
         try {
           return Number(window.localStorage.getItem(RESTART_STARTED_KEY) ?? "0");
         } catch {
@@ -2318,6 +2358,7 @@ function Shell({
       })();
       if (!startedAt) return;
       if (status !== "open") {
+        restartStartedAtRef.current = startedAt;
         restartSawDisconnectRef.current = true;
         return;
       }
@@ -2330,6 +2371,7 @@ function Shell({
         // ignore storage errors
       }
       const refreshGeneration = ++settingsRefreshGenerationRef.current;
+      restartStartedAtRef.current = 0;
       setIsRestarting(false);
       setRestartToast(t("app.restart.completed", { seconds: (elapsedMs / 1000).toFixed(1) }));
       window.setTimeout(() => setRestartToast(null), 3_500);
@@ -2349,6 +2391,7 @@ function Shell({
 
   const onConfirmDelete = useCallback(async () => {
     if (!pendingDelete) return;
+    pendingDelete.onDecision?.(true);
     const items = pendingDelete.items;
     const deletingKeys = new Set(items.map((item) => item.key));
     const hasAutomations = (pendingDelete.automations?.length ?? 0) > 0;
@@ -2402,7 +2445,7 @@ function Shell({
     }
   }, [pendingDelete, deleteChat, activeKey, activeTabState, navigate, topicSessions, filePreviewStore, draftStore]);
 
-  const onRequestDeleteMany = useCallback(async (items: SidebarDeleteItem[]) => {
+  const onRequestDeleteMany = useCallback(async (items: SidebarDeleteItem[], onDecision?: SidebarDeleteDecision) => {
     const uniqueItems = Array.from(new Map(items.map((item) => [item.key, item])).values());
     if (uniqueItems.length === 0) return;
     const automationResults = await Promise.allSettled(
@@ -2411,19 +2454,28 @@ function Shell({
     const automations = automationResults.flatMap((result) => (
       result.status === "fulfilled" ? result.value : []
     ));
-    setPendingDelete({ items: uniqueItems, automations });
+    let decision = onDecision;
+    setPendingDelete({
+      items: uniqueItems,
+      automations,
+      onDecision: (confirmed) => {
+        const notify = decision;
+        decision = undefined;
+        notify?.(confirmed);
+      },
+    });
   }, [getSessionAutomations]);
 
-  const onRequestDelete = useCallback((key: string, label: string) => {
-    void onRequestDeleteMany([{ key, label }]);
+  const onRequestDelete = useCallback((key: string, label: string, onDecision?: SidebarDeleteDecision) => {
+    void onRequestDeleteMany([{ key, label }], onDecision);
   }, [onRequestDeleteMany]);
 
   const visiblePairingRequests = useMemo(
     () => {
       const now = Date.now();
       return pairingRequests.filter((request) => {
-        const snoozedUntil = snoozedPairingCodes.get(request.code);
-        return !snoozedUntil || snoozedUntil <= now;
+        const snooze = snoozedPairingCodes.get(request.code);
+        return !snooze || snooze.until <= now;
       });
     },
     [pairingRequests, snoozedPairingCodes],
@@ -2444,20 +2496,22 @@ function Shell({
         });
       } catch (e) {
         setPairingError((e as Error).message);
-        void refreshPairingRequests();
       } finally {
         setPairingBusyCode(null);
+        // A mutation reply can be older than an already-delivered notification.
+        void refreshPairingRequests();
       }
     },
     [client, refreshPairingRequests],
   );
 
-  const onDismissPairingRequest = useCallback((code: string) => {
+  const onDismissPairingRequest = useCallback((request: PairingRequestInfo) => {
     setSnoozedPairingCodes((current) => {
-      const snoozedUntil = Date.now() + PAIRING_DISMISS_SNOOZE_MS;
-      if (current.get(code) === snoozedUntil) return current;
       const next = new Map(current);
-      next.set(code, snoozedUntil);
+      next.set(request.code, {
+        until: Date.now() + PAIRING_DISMISS_SNOOZE_MS,
+        deliveryStatus: request.delivery_status,
+      });
       return next;
     });
   }, []);
@@ -2736,12 +2790,13 @@ function Shell({
     : activeKey;
 
   const sidebarProps = {
-    sessions: sidebarTopicSessions,
-    temporarySessions: temporarySessionList,
+    sessions: sidebarStateLoading ? [] : sidebarTopicSessions,
+    temporarySessions: sidebarStateLoading ? [] : temporarySessionList,
     activeKey: !managingConnections && view === "chat"
       ? (temporaryChatActive ? activeKey : activeSidebarKey)
       : null,
-    loading,
+    loading: loading || sidebarStateLoading,
+    initialLoading: sessionsInitialLoading || sidebarStateLoading,
     newChatActive: !managingConnections && view === "chat" && activeKey === null,
     onNewChat,
     onSelect: onSelectSidebarItem,
@@ -2751,6 +2806,7 @@ function Shell({
     onTogglePin,
     onRequestRename,
     onToggleArchive,
+    onArchiveMany,
     onRequestRenameTab,
     paneGroups: sidebarPaneGroups,
     onSelectPane: onSelectSidebarPane,
@@ -2762,6 +2818,12 @@ function Shell({
     onRequestRenameProject,
     onNewChatInProject,
     onOpenSettings,
+    onOpenUpdates: () => onOpenSettings("about"),
+    availableUpdate: localActive && !isNativeRuntime(effectiveRuntimeSurface)
+      && versionCheck.result?.type === "update" && versionCheck.result.latestVersion !== versionCheck.dismissedVersion
+      ? { version: versionCheck.result.latestVersion, onDismiss: versionCheck.dismiss, onRequestUpdate: updateFlow.open,
+        installationMethod: updateFlow.pending ? null : versionCheck.installationMethod }
+      : undefined,
     onOpenApps,
     onOpenAutomations,
     onOpenChannels,
@@ -2816,11 +2878,7 @@ function Shell({
                   onClick={toggle}
                   className="h-8 w-8 rounded-full text-muted-foreground/85 hover:bg-accent/40 hover:text-foreground"
                 >
-                  {theme === "dark" ? (
-                    <Sun className="h-4 w-4" />
-                  ) : (
-                    <Moon className="h-4 w-4" />
-                  )}
+                  <ThemeToggleIcon theme={theme} />
                 </Button>
               )
             }
@@ -2846,6 +2904,7 @@ function Shell({
               }}
             >
               <div
+                data-theme-surface
                 className={cn(
                   "absolute inset-y-0 left-0 h-full w-full overflow-hidden",
                   showHostChrome
@@ -2879,6 +2938,12 @@ function Shell({
             >
               <SheetContent
                 ref={mobileSidebarRef}
+                onEscapeKeyDown={(event) => {
+                  if (event.target instanceof Element
+                    && event.target.closest("[data-sidebar-topic-rename]")) {
+                    event.preventDefault();
+                  }
+                }}
                 onOpenAutoFocus={(event) => {
                   // Keep opening navigation from focusing the search tooltip trigger.
                   event.preventDefault();
@@ -2909,11 +2974,13 @@ function Shell({
                 activeKey={activeKey}
                 loading={loading}
                 titleOverrides={sidebarState.title_overrides}
+                messageCache={threadMessageCache}
                 onSelect={onSelectSearchResult}
               />
             </Suspense>
           ) : null}
         <main ref={managementMain}
+          data-theme-surface
           aria-hidden={managingConnections && remoteConnections?.embeddedManagement || undefined}
           {...(managingConnections && remoteConnections?.embeddedManagement ? { inert: "" } : {})}
           className={cn(
@@ -2929,7 +2996,7 @@ function Shell({
               )}
             >
               <ThreadVisibilityContext.Provider value={localActive && !managingConnections && view === "chat"}>
-                <Suspense fallback={<StartupShell embedded />}>
+                <Suspense fallback={<StartupShell embedded surface="chat" sidebarExpanded={hostSidebarOpen} />}>
                   <PaneWorkbench
                     panes={renderedWorkbenchPanes}
                     activePaneKey={renderedActivePaneKey}
@@ -2969,6 +3036,7 @@ function Shell({
                           <ThreadShell
                             session={activeSession}
                             sessions={sessions}
+                            titleOverrides={sidebarState.title_overrides}
                             title={headerTitle}
                             temporary={temporaryChatRequested}
                             temporaryChatIds={temporaryChatIds}
@@ -2980,7 +3048,6 @@ function Shell({
                               !activeKey ? onTemporaryChatEnabledChange : undefined
                             }
                             onToggleSidebar={toggleSidebar}
-                            onNewChat={onNewChat}
                             onCreateChat={
                               temporaryChatEnabled ? onCreateTemporaryChat : onCreateChat
                             }
@@ -3019,13 +3086,13 @@ function Shell({
                         <ThreadShell
                           session={paneSession}
                           sessions={sessions}
+                          titleOverrides={sidebarState.title_overrides}
                           title={pane.title}
                           temporaryChatIds={temporaryChatIds}
                           messageCache={threadMessageCache}
                           filePreviewStore={filePreviewStore}
                           draftStore={draftStore}
                           onToggleSidebar={toggleSidebar}
-                          onNewChat={onNewChat}
                           onCreateChat={onCreateChat}
                           pendingFirstMessage={pendingAutomationMessage}
                           onPendingFirstMessageConsumed={onPendingAutomationMessageConsumed}
@@ -3042,6 +3109,7 @@ function Shell({
                           headerPortalTarget={context.headerPortalTarget}
                           headerActive={context.active}
                           composerPortalTarget={context.composerPortalTarget}
+                          navigationFrame={context.navigationFrame}
                           composerActive={context.active}
                           composerInputAriaLabel={t("workbench.composerAria", {
                             title: pane.title,
@@ -3075,19 +3143,19 @@ function Shell({
             </div>}
             {view !== "chat" && (
               <div className="absolute inset-0 flex flex-col">
-                {view === "remote" ? <RemoteConnectionsPage
+                {view === "remote" ? <LazyRemoteConnectionsPage
                   mainNavigationExpanded={showMainSidebar && hostSidebarOpen}
                   hostChromeInset={showHostChrome}
                   onBackToChat={onBackToChat}
-                /> : <Suspense fallback={<SurfaceLoadingFallback />}>
+                /> : <Suspense fallback={<StartupShell embedded surface={view} sidebarExpanded={hostSidebarOpen} />}>
                   <SettingsView
                     registerExitGuard={registerSettingsExitGuard}
-                    theme={theme}
+                    themePreference={themePreference}
                     initialSection={settingsInitialSection}
                     initialSettings={settingsSnapshot}
                     showSidebar={view === "settings"}
                     mainNavigationExpanded={showMainSidebar && hostSidebarOpen}
-                    onToggleTheme={toggle}
+                    onChangeTheme={setTheme}
                     onBackToChat={onBackToChat}
                     onModelNameChange={onModelNameChange}
                     onSettingsChange={setSettingsSnapshot}
@@ -3109,7 +3177,7 @@ function Shell({
             )}
           </div>
           {managingConnections && !remoteConnections?.embeddedManagement && <div className="absolute inset-0 flex flex-col">
-            <RemoteConnectionsPage
+            <LazyRemoteConnectionsPage
               mainNavigationExpanded={showMainSidebar && hostSidebarOpen}
               hostChromeInset={showHostChrome}
               onBackToChat={() => remoteConnections?.closeManagement()}
@@ -3125,24 +3193,17 @@ function Shell({
               title={pendingDelete.items[0]?.label ?? ""}
               count={pendingDelete.items.length}
               automations={pendingDelete.automations}
-              onCancel={() => setPendingDelete(null)}
+              onCancel={() => {
+                pendingDelete.onDecision?.(false);
+                setPendingDelete(null);
+              }}
               onConfirm={onConfirmDelete}
-            />
-          </Suspense>
-        ) : null}
-        {pendingRename ? (
-          <Suspense fallback={null}>
-            <RenameChatDialog
-              open
-              title={pendingRename.label}
-              onCancel={() => setPendingRename(null)}
-              onConfirm={onConfirmRename}
             />
           </Suspense>
         ) : null}
         {pendingTabRename ? (
           <Suspense fallback={null}>
-            <RenameChatDialog
+            <RenameDialog
               open
               title={pendingTabRename.label}
               dialogTitle={t("workbench.renameGroupTitle")}
@@ -3155,7 +3216,7 @@ function Shell({
         ) : null}
         {pendingProjectRename ? (
           <Suspense fallback={null}>
-            <RenameChatDialog
+            <RenameDialog
               open
               title={pendingProjectRename.label}
               dialogTitle={t("chat.renameProjectTitle")}

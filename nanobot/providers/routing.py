@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from nanobot.config.schema import Config, ModelAPIConfig, ModelPresetConfig, ProviderConfig
 from nanobot.providers.model_api import ModelAPICapabilities, ProviderAPI, RequestAPI
 from nanobot.providers.registry import ProviderSpec, create_dynamic_spec, find_by_name
+from nanobot.providers.request_overrides import (
+    apply_request_overrides,
+    isolate_request_overrides,
+    request_override_fields,
+)
 
 
 @dataclass(frozen=True)
@@ -94,6 +99,12 @@ def resolve_provider_route(
     model: str | None = None,
 ) -> ProviderRoute:
     """Resolve and validate provider configuration without constructing a client."""
+    if model is not None:
+        preset = isolate_request_overrides(
+            preset.model_copy(update={"model": model}),
+            previous_provider=config.get_provider_name(preset=preset),
+            provider=config.get_provider_name(model, preset=preset),
+        )
     model = model or preset.model
     provider_name = config.get_provider_name(model, preset=preset)
     provider_config = config.get_provider(model, preset=preset)
@@ -106,15 +117,22 @@ def resolve_provider_route(
     model_api = resolve_model_api(spec, provider_config, preset.api) if spec is not None else None
     if model_api is not None and model_api.preferred_api == "anthropic_messages":
         backend = "anthropic"
+    for field in ("extra_headers", "extra_query", "extra_body"):
+        if getattr(preset, field) and field not in request_override_fields(backend):
+            raise ValueError(f"Model preset {field} is not supported by '{provider_name}'.")
+    provider_config = apply_request_overrides(provider_config, preset)
     if (
         provider_config
-        and provider_config.proxy
+        and provider_config.use_proxy
         and backend not in {"openai_compat", "openai_codex", "xai_grok", "anthropic"}
     ):
         raise ValueError(
-            f"providers.{provider_name}.proxy is only supported for "
+            f"providers.{provider_name}.use_proxy is only supported for "
             "OpenAI-compatible providers, Anthropic Messages, OpenAI Codex, and xAI Grok."
         )
+
+    if provider_config:
+        config.network.resolve_proxy(provider_config.use_proxy)
 
     if backend == "azure_openai":
         if not provider_config or not provider_config.api_base:
@@ -162,7 +180,7 @@ def resolve_automatic_model_api(
         from nanobot.providers.github_copilot_provider import cached_github_copilot_model_api
 
         api = cached_github_copilot_model_api(
-            setup.model, provider_config.proxy if provider_config else None,
+            setup.model, config.network.resolve_proxy(provider_config.use_proxy) if provider_config else None,
         )
         if api is not None:
             return setup.provider_name, api.preferred_api

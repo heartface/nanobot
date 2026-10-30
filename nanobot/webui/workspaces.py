@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import platform
 import socket
 import time
+import weakref
 from collections import OrderedDict
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -23,6 +26,7 @@ from nanobot.security.workspace_access import (
     default_workspace_scope,
     validate_workspace_scope_payload,
 )
+from nanobot.session.webui_turns import websocket_turn_wall_started_at
 from nanobot.webui.session_identity import webui_session_key
 
 if TYPE_CHECKING:
@@ -175,7 +179,6 @@ def workspaces_payload(
     default_workspace: Path,
     default_restrict_to_workspace: bool,
     can_change_project: bool,
-    can_use_full_access: bool,
 ) -> dict[str, Any]:
     state = read_webui_workspace_state()
     default_access_mode = state["default_access_mode"]
@@ -203,7 +206,6 @@ def workspaces_payload(
         ],
         "controls": {
             "can_change_project": can_change_project,
-            "can_use_full_access": can_use_full_access,
             "can_browse_directories": can_change_project,
             "can_resolve_project": can_change_project,
             "can_manage_favorites": can_change_project,
@@ -225,6 +227,15 @@ class WebUIWorkspaceController:
         self._default_workspace = default_workspace
         self._default_restrict_to_workspace = default_restrict_to_workspace
         self._draft_scopes: OrderedDict[str, WorkspaceScope] = OrderedDict()
+        self._scope_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+    def _scope_lock(self, chat_id: str) -> asyncio.Lock:
+        """Serialize draft edits with message admission, not with agent execution."""
+        lock = self._scope_locks.get(chat_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._scope_locks[chat_id] = lock
+        return lock
 
     def default_scope(self) -> WorkspaceScope:
         return default_scope_for_webui(
@@ -281,13 +292,33 @@ class WebUIWorkspaceController:
         return self._scope_from_metadata_value(raw_scope, default_scope=default_scope)
 
     def scope_for_session_key(self, session_key: str) -> WorkspaceScope:
+        return self.existing_scope_for_session_key(session_key) or self.default_scope()
+
+    def existing_scope_for_session_key(self, session_key: str) -> WorkspaceScope | None:
+        """Resolve live authority without turning a deleted session into a default scope."""
+        draft = self._draft_scopes.get(session_key)
+        if draft is not None:
+            self._draft_scopes.move_to_end(session_key)
+            return draft
+        if self._sessions is None:
+            return None
+        identity = self._sessions.state.peek_identity(session_key)
+        if identity is not None and not identity.policy.persist:
+            return self.restricted_default_scope()
+        data = self._sessions.read_session_metadata(session_key)
+        return self._scope_from_snapshot(data) if data is not None else None
+
+    async def async_scope_for_session_key(self, session_key: str) -> WorkspaceScope:
         draft = self._draft_scopes.get(session_key)
         if draft is not None:
             self._draft_scopes.move_to_end(session_key)
             return draft
         if self._sessions is None:
             return self.default_scope()
-        data = self._sessions.read_session_metadata(session_key)
+        data = await self._sessions.state.read_metadata(session_key)
+        return self._scope_from_snapshot(data)
+
+    def _scope_from_snapshot(self, data: dict[str, Any] | None) -> WorkspaceScope:
         if not isinstance(data, dict):
             return self.default_scope()
         metadata = data.get("metadata", {})
@@ -298,17 +329,24 @@ class WebUIWorkspaceController:
             cast(object, metadata_data.get(WORKSPACE_SCOPE_METADATA_KEY))
         )
 
+    def _validate_existing_project(self, metadata: Mapping[str, Any], scope: WorkspaceScope) -> None:
+        raw = metadata.get(WORKSPACE_SCOPE_METADATA_KEY)
+        stored = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+        path = stored.get("project_path") or stored.get("path")
+        # Compare the stored path even when the directory has since disappeared.
+        project = Path(path) if isinstance(path, str) and path else self._default_workspace
+        if project.expanduser().resolve(strict=False) != scope.project_path:
+            raise WorkspaceScopeError("project_locked", status=409)
+
     def payload(
         self,
         *,
         can_change_project: bool,
-        can_use_full_access: bool,
     ) -> dict[str, Any]:
         return workspaces_payload(
             default_workspace=self._default_workspace,
             default_restrict_to_workspace=self._default_restrict_to_workspace,
             can_change_project=can_change_project,
-            can_use_full_access=can_use_full_access,
         )
 
     def resolve_project(self, path: object) -> dict[str, str]:
@@ -352,15 +390,24 @@ class WebUIWorkspaceController:
             write_webui_workspace_state(state)
         return [{"name": Path(item).name or item, "path": item} for item in favorites]
 
-    def scope_from_envelope(
+    async def scope_from_envelope(
         self,
         envelope: dict[str, Any],
         *,
         session_key: str | None,
         can_change_project: bool,
-        can_use_full_access: bool,
     ) -> WorkspaceScope:
-        current = self.scope_for_session_key(session_key) if session_key else self.default_scope()
+        data = (
+            await self._sessions.state.read_metadata(session_key)
+            if self._sessions is not None and session_key else None
+        )
+        if data is not None:
+            current = self._scope_from_snapshot(data)
+        elif session_key and (draft := self._draft_scopes.get(session_key)) is not None:
+            self._draft_scopes.move_to_end(session_key)
+            current = draft
+        else:
+            current = self.default_scope()
         raw = envelope.get(WORKSPACE_SCOPE_METADATA_KEY)
         if raw is None:
             scope = current
@@ -371,104 +418,127 @@ class WebUIWorkspaceController:
                 default_restrict_to_workspace=self._default_restrict_to_workspace,
                 source_channel=_WEBUI_SCOPE_CHANNEL,
             )
+        if data is not None:
+            self._validate_existing_project(data["metadata"], scope)
         if not can_change_project and not _scope_change_is_non_escalating(current, scope):
             raise WorkspaceScopeError(
                 "project selection is unavailable for this connection",
                 status=403,
             )
-        if (
-            not can_use_full_access
-            and scope.access_mode == "full"
-            and (
-                current.access_mode != "full"
-                or scope.project_path != current.project_path
-            )
-        ):
-            raise WorkspaceScopeError(
-                "full workspace access is unavailable for this connection",
-                status=403,
-            )
         return scope
 
-    def scope_for_new_chat(
+    async def scope_for_new_chat(
         self,
         envelope: dict[str, Any],
         *,
         can_change_project: bool,
-        can_use_full_access: bool,
     ) -> WorkspaceScope:
-        return self.scope_from_envelope(
+        return await self.scope_from_envelope(
             envelope,
             session_key=None,
             can_change_project=can_change_project,
-            can_use_full_access=can_use_full_access,
         )
 
-    def scope_for_set_request(
+    async def scope_for_set_request(
         self,
         envelope: dict[str, Any],
         *,
         chat_id: str,
         chat_running: bool,
         can_change_project: bool,
-        can_use_full_access: bool,
     ) -> WorkspaceScope:
         if chat_running:
             raise WorkspaceScopeError("chat_running", status=409)
-        return self.scope_from_envelope(
+        return await self.scope_from_envelope(
             envelope,
             session_key=webui_session_key(chat_id),
             can_change_project=can_change_project,
-            can_use_full_access=can_use_full_access,
         )
 
-    def scope_for_message(
+    async def scope_for_message(
         self,
         envelope: dict[str, Any],
         *,
         chat_id: str,
         chat_running: bool,
         can_change_project: bool,
-        can_use_full_access: bool,
     ) -> WorkspaceScope:
-        scope = self.scope_from_envelope(
+        scope = await self.scope_from_envelope(
             envelope,
             session_key=webui_session_key(chat_id),
             can_change_project=can_change_project,
-            can_use_full_access=can_use_full_access,
         )
         if (
             WORKSPACE_SCOPE_METADATA_KEY in envelope
             and chat_running
-            and scope.metadata() != self.scope_for_session_key(webui_session_key(chat_id)).metadata()
+            and scope.metadata()
+            != (await self.async_scope_for_session_key(webui_session_key(chat_id))).metadata()
         ):
             raise WorkspaceScopeError("chat_running", status=409)
         return scope
 
-    def persist_scope(self, chat_id: str, scope: WorkspaceScope) -> None:
-        session_key = webui_session_key(chat_id)
+    async def persist_scope(
+        self,
+        chat_id: str,
+        scope: WorkspaceScope,
+        *,
+        session_key: str | None = None,
+        expected_generation: str | None = None,
+    ) -> tuple[str | None, bool]:
+        async with self._scope_lock(chat_id):
+            return await self._persist_scope(
+                session_key or webui_session_key(chat_id), scope, expected_generation,
+            )
+
+    async def _persist_scope(
+        self, session_key: str, scope: WorkspaceScope, expected_generation: str | None = None,
+    ) -> tuple[str | None, bool]:
+        generation = expected_generation
+        created = False
         if self._sessions is not None:
-            session = self._sessions.get_or_create(session_key)
-            session.metadata["webui"] = True
-            session.metadata[WORKSPACE_SCOPE_METADATA_KEY] = scope.metadata()
-            self._sessions.save(session)
+            generation, created = await self._sessions.state.open_with_metadata(
+                session_key,
+                {"webui": True, WORKSPACE_SCOPE_METADATA_KEY: scope.metadata()},
+                expected_generation=generation,
+                validate_existing=lambda metadata: self._validate_existing_project(metadata, scope),
+            )
         self._draft_scopes.pop(session_key, None)
         remember_webui_project(scope.project_path)
+        return generation, created
 
-    def stage_scope(self, chat_id: str, scope: WorkspaceScope) -> None:
-        """Keep a new chat's scope transient until its first accepted message."""
-        session_key = webui_session_key(chat_id)
-        if (
-            self._sessions is not None
-            and self._sessions.read_session_metadata(session_key) is not None
-        ):
-            self.persist_scope(chat_id, scope)
+    async def rollback_scope_admission(
+        self,
+        session_key: str,
+        generation: str | None,
+        *,
+        created: bool,
+    ) -> None:
+        """Remove a newly opened session when transport admission fails."""
+        if not created or generation is None or self._sessions is None:
             return
-        remember_webui_project(scope.project_path)
-        self._draft_scopes[session_key] = scope
-        self._draft_scopes.move_to_end(session_key)
-        while len(self._draft_scopes) > _MAX_DRAFT_SCOPES:
-            self._draft_scopes.popitem(last=False)
+        await self._sessions.state.delete(
+            session_key,
+            expected_generation=generation,
+        )
+
+    async def stage_scope(self, chat_id: str, scope: WorkspaceScope) -> WorkspaceScope:
+        """Keep a new chat's scope transient until its first accepted message."""
+        async with self._scope_lock(chat_id):
+            if websocket_turn_wall_started_at(chat_id) is not None:
+                raise WorkspaceScopeError("chat_running", status=409)
+            session_key = webui_session_key(chat_id)
+            if (
+                self._sessions is not None
+                and await self._sessions.state.read_metadata(session_key) is not None
+            ):
+                await self._persist_scope(session_key, scope)
+                return scope
+            remember_webui_project(scope.project_path)
+            self._draft_scopes[session_key] = scope
+            self._draft_scopes.move_to_end(session_key)
+            while len(self._draft_scopes) > _MAX_DRAFT_SCOPES:
+                self._draft_scopes.popitem(last=False)
+            return scope
 
     def discard_draft_scope(self, session_key: str) -> bool:
         """Discard the staged scope for a chat that has not persisted yet."""

@@ -1,7 +1,8 @@
 import {
   TemporaryChatIcon,
 } from "@/components/icons/product-icons";
-import { Menu, Moon, Sun } from "lucide-react";
+import { Menu } from "lucide-react";
+import { ThemeToggleIcon } from "@/components/icons/ThemeToggleIcon";
 import { type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -74,6 +75,7 @@ export function ThreadHeader({
       )}
     >
       <div
+        data-theme-surface
         className={cn(
           controlsClassName,
           "relative min-w-0",
@@ -87,7 +89,7 @@ export function ThreadHeader({
             aria-label={t("thread.header.toggleSidebar")}
             onClick={onToggleSidebar}
             className={cn(
-              "h-7 w-7 rounded-xl text-muted-foreground hover:text-foreground",
+              "h-7 w-7 rounded-control text-muted-foreground hover:text-foreground",
               hideSidebarToggleForHostChrome && "lg:hidden",
             )}
           >
@@ -110,7 +112,7 @@ export function ThreadHeader({
         ) : null}
       </div>
 
-      <div className={cn(controlsClassName, "ml-auto shrink-0")}>
+      <div data-theme-surface className={cn(controlsClassName, "ml-auto shrink-0")}>
         {sessionInfoAction}
         {promptNavigatorAction}
         {actions}
@@ -127,7 +129,7 @@ export function ThreadHeader({
                   aria-pressed={temporaryChatEnabled}
                   onClick={() => onTemporaryChatEnabledChange(!temporaryChatEnabled)}
                   className={cn(
-                    "host-no-drag h-8 w-8 shrink-0 rounded-xl text-muted-foreground hover:text-foreground",
+                    "host-no-drag h-8 w-8 shrink-0 rounded-control text-muted-foreground hover:text-foreground",
                   )}
                 >
                   <TemporaryChatIcon
@@ -145,7 +147,7 @@ export function ThreadHeader({
               <TooltipContent
                 side="bottom"
                 align="end"
-                className="max-w-72 rounded-xl border border-border/70 bg-popover px-3 py-2 text-[12px]/[1.4] text-popover-foreground shadow-[0_8px_24px_rgba(15,23,42,0.13)] dark:border-white/10"
+                className="max-w-72 rounded-control border border-border/70 bg-popover px-3 py-2 text-[12px]/[1.4] text-popover-foreground shadow-[0_8px_24px_rgba(15,23,42,0.13)] dark:border-white/10"
               >
                 <div className="font-medium">{t("temporaryChat.title")}</div>
                 <div className="mt-1 text-muted-foreground">
@@ -191,15 +193,11 @@ function ThemeButton({
       aria-label={label}
       onClick={onToggleTheme}
       className={cn(
-        "host-no-drag h-8 w-8 rounded-xl text-muted-foreground/85 hover:text-foreground",
+        "host-no-drag h-8 w-8 rounded-control text-muted-foreground/85 hover:text-foreground",
         className,
       )}
     >
-      {theme === "dark" ? (
-        <Sun className="h-4 w-4" />
-      ) : (
-        <Moon className="h-4 w-4" />
-      )}
+      <ThemeToggleIcon theme={theme} />
     </Button>
   );
 }

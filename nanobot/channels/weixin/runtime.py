@@ -31,12 +31,13 @@ from loguru import logger
 from pydantic import Field, model_validator
 
 from nanobot import __version__
+from nanobot.bus.delivery import ChannelNotReadyError
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.outbound_events import ProgressEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.paths import get_media_dir, get_runtime_subdir
-from nanobot.config.schema import Base
+from nanobot.config_base import Base
 from nanobot.events import ContextCompactionEvent
 from nanobot.utils.logging_bridge import redirect_lib_logging
 
@@ -1864,6 +1865,11 @@ class WeixinChannel(BaseChannel):
         self._raise_for_api_error("sendmessage", data)
         self._record_context_send(context_token)
 
+    def prepare_tool_events(self, msg: OutboundMessage) -> OutboundMessage:
+        if self.config.reply_progress_messages:
+            return msg
+        return super().prepare_tool_events(msg)
+
     async def send(self, msg: OutboundMessage) -> None:
         event = getattr(msg, "event", None)
         if isinstance(event, ContextCompactionEvent) and not (
@@ -1871,7 +1877,7 @@ class WeixinChannel(BaseChannel):
         ):
             return
         if not self._client or not self._token:
-            raise RuntimeError("WeChat client not initialized or not authenticated")
+            raise ChannelNotReadyError("WeChat client not initialized or not authenticated")
         self._assert_session_active()
 
         delivery_id = self._delivery_id(msg)
@@ -2081,7 +2087,13 @@ class WeixinChannel(BaseChannel):
                 )
                 delivery_state.completed_parts.add(text_part)
             completed = True
-        except WeixinQuotaError:
+        except WeixinQuotaError as error:
+            if msg.delivery_id is not None:
+                # The durable outbox owns scheduled results. Do not also retain
+                # one in the channel's independently replayed, volatile queue.
+                if not delivery_state.completed_parts:
+                    raise ChannelNotReadyError("WeChat needs a fresh inbound context") from error
+                raise
             if not is_progress:
                 self._defer_outbound(msg)
                 self.logger.warning(
@@ -2129,12 +2141,8 @@ class WeixinChannel(BaseChannel):
         remaining reply. The manager skips the final ``StreamedResponseEvent``
         to avoid duplicate delivery. Reasoning deltas are dropped.
         """
-        meta = metadata or {}
-        if meta.get("_reasoning_delta") or meta.get("_reasoning"):
-            return
-        is_end = stream_end or bool(meta.get("_stream_end"))
         buffer_key = stream_id or chat_id
-        if is_end and merge_next:
+        if stream_end and merge_next:
             if delta:
                 self._stream_buffers.setdefault(buffer_key, []).append(delta)
             return
@@ -2143,7 +2151,7 @@ class WeixinChannel(BaseChannel):
         # folded into `full` below instead of appended here, so a send retry
         # recomputes the same `full` from an unchanged buffer rather than
         # double-counting that delta.
-        if delta and not is_end:
+        if delta and not stream_end:
             previous_parts = list(self._stream_buffers.get(buffer_key, []))
             self._stream_buffers.setdefault(buffer_key, []).append(delta)
             try:
@@ -2151,7 +2159,7 @@ class WeixinChannel(BaseChannel):
             except Exception:
                 self._stream_buffers[buffer_key] = previous_parts
                 raise
-        if not is_end:
+        if not stream_end:
             return
         full = ("".join(self._stream_buffers.get(buffer_key, [])) + (delta or "")).strip()
         if full:

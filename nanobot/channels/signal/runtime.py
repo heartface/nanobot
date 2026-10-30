@@ -17,12 +17,13 @@ from typing import Any, TypedDict, cast
 import httpx
 from pydantic import Field, computed_field, field_validator
 
+from nanobot.bus.delivery import ChannelNotReadyError
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.outbound_events import ProgressEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.paths import get_media_dir
-from nanobot.config.schema import Base
+from nanobot.config_base import Base
 from nanobot.events import ContextCompactionEvent
 from nanobot.pairing import is_approved
 from nanobot.utils.helpers import safe_filename, split_message
@@ -432,6 +433,7 @@ class SignalChannel(BaseChannel):
         is_dm: bool = False,
         authorization_id: str | None = None,
         require_existing_session: bool = False,
+        session_generation: str | None = None,
     ) -> None:
         """Handle an inbound message whose policy has already been checked.
 
@@ -454,6 +456,7 @@ class SignalChannel(BaseChannel):
                 media=media or [],
                 metadata=meta,
                 session_key_override=session_key,
+                session_generation=session_generation,
                 require_existing_session=require_existing_session,
             )
         )
@@ -569,6 +572,8 @@ class SignalChannel(BaseChannel):
             msg.event.notify or self.show_compaction_notices
         ):
             return
+        if not self._http:
+            raise ChannelNotReadyError("Signal client not connected")
         is_progress_message = isinstance(msg.event, ProgressEvent)
         try:
             plain_text, text_styles = _markdown_to_signal(msg.content)
@@ -657,10 +662,6 @@ class SignalChannel(BaseChannel):
                             # SSE spec: strip one optional leading space after "data:".
                             event_buffer.append(line[6:] if line[5:6] == " " else line[5:])
 
-                        # "event:" line - just log it (we only care about data)
-                        elif line.startswith("event:"):
-                            pass  # Ignore event type for now
-
                 if self._running:
                     raise ConnectionError("Signal SSE stream closed by remote endpoint")
 
@@ -718,7 +719,6 @@ class SignalChannel(BaseChannel):
             # Check different message types
             data_message = _as_json_object(envelope.get("dataMessage"))
             sync_message = _as_json_object(envelope.get("syncMessage"))
-            typing_message = _as_json_object(envelope.get("typingMessage"))
             receipt_message = _as_json_object(envelope.get("receiptMessage"))
 
             # Ignore receipt messages (delivery/read receipts)
@@ -736,10 +736,6 @@ class SignalChannel(BaseChannel):
                     self.logger.debug(
                         "Sync message sent to {}: {}", destination, sent_msg.get("message", "")[:50]
                     )
-
-            # Handle typing indicators (silently ignore)
-            elif typing_message:
-                pass  # Ignore typing indicators
 
     async def _handle_data_message(
         self,

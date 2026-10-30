@@ -13,13 +13,9 @@ nanobot includes a browser WebUI for persistent chat sessions, visible agent act
 
 Use the WebUI when you want a local AI agent interface that is easier to operate than a terminal, especially for project work, file attachments, model switching, workspace selection, Apps, Skills, and scheduled automations.
 
-## Install
+## Before you start
 
-```bash
-python -m pip install nanobot-ai
-nanobot onboard --wizard
-nanobot agent -m "Hello!"
-```
+Complete [Quick Start](../quick-start.md) if nanobot is not installed or cannot reply yet. If you already have a working WebUI or CLI session, continue here using that instance; no reinstall or second gateway is needed.
 
 The published wheel already includes the WebUI bundle. You only need the `webui/` source directory when changing the frontend.
 
@@ -32,6 +28,17 @@ nanobot webui
 The launcher checks setup, enables the local WebSocket channel after confirmation, starts the gateway, and opens the browser.
 
 When nanobot edits a file, the WebUI activity timeline can show the changed line counts, a unified diff, and an **Open file** action for a read-only preview. File previews use the chat's current workspace access mode: restricted access stays inside the selected workspace, while Full Access can preview files outside the workspace when the gateway allows it.
+
+## Browser notifications
+
+When the WebUI is in the background, browser notifications tell you when a task finishes, fails, or needs attention. Click a notification to return to its chat.
+
+1. Open **Settings → Notifications**.
+2. Turn on **Browser notifications** and allow the browser's permission request.
+3. Select **Test notification** to try it. If nothing appears, check the browser's site permissions, system notification settings, and Do Not Disturb.
+4. Enable **Completion sound** separately if you want a page chime.
+
+Keep the page open and connected, and use HTTPS or localhost. On iPhone or iPad, open the web app from the Home Screen. If your browser cannot enable notifications, follow the guidance shown in Settings.
 
 ## Production notes
 

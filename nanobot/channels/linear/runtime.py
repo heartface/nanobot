@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
 
+from nanobot.bus.delivery import ChannelNotReadyError
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.outbound_events import ContextCompactionEvent, ProgressEvent, RetryWaitEvent
 from nanobot.bus.queue import MessageBus
@@ -167,6 +168,8 @@ class LinearChannel(BaseChannel):
                 ephemeral=True,
             )
             return
+        if self._client is None:
+            raise ChannelNotReadyError("Linear HTTP client is not initialized")
         body = msg.content
         if msg.media:
             attachments = await self._attachment_markdown(msg)
@@ -193,6 +196,9 @@ class LinearChannel(BaseChannel):
             {"type": "response", "body": body},
             key="response",
         )
+
+    def prepare_tool_events(self, msg: OutboundMessage) -> OutboundMessage:
+        return msg
 
     async def _attachment_markdown(self, msg: OutboundMessage) -> list[str]:
         client = self._client

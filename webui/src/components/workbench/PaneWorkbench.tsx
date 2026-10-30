@@ -31,12 +31,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { HoverHint } from "@/components/ui/tooltip";
 import {
   createWorkbenchLayoutGeometry,
   resizeHandleRatio,
@@ -58,6 +53,7 @@ interface PaneRenderContext {
   active: boolean;
   headerPortalTarget: HTMLElement | null | undefined;
   composerPortalTarget: HTMLElement | null | undefined;
+  navigationFrame: HTMLElement | null | undefined;
   headerActions: ReactNode;
 }
 
@@ -174,8 +170,7 @@ function HeaderIconButton({
   onClick: () => void;
 }) {
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
+    <HoverHint content={disabled ? disabledLabel ?? label : label} side="bottom">
         <span className="inline-flex">
           <Button
             type="button"
@@ -189,9 +184,7 @@ function HeaderIconButton({
             <Icon className="h-4 w-4" aria-hidden />
           </Button>
         </span>
-      </TooltipTrigger>
-      <TooltipContent side="bottom">{disabled ? disabledLabel ?? label : label}</TooltipContent>
-    </Tooltip>
+    </HoverHint>
   );
 }
 
@@ -216,6 +209,7 @@ export function PaneWorkbench({
   const effectiveLayout = layout;
   const [headerPortalTarget, setHeaderPortalTarget] = useState<HTMLElement | null>(null);
   const [composerPortalTarget, setComposerPortalTarget] = useState<HTMLElement | null>(null);
+  const [navigationFrame, setNavigationFrame] = useState<HTMLElement | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
   const paneRefs = useRef(new Map<string, HTMLElement>());
   const lastRectsRef = useRef(new Map<string, DOMRect>());
@@ -683,6 +677,8 @@ export function PaneWorkbench({
 
   return (
     <section
+      ref={setNavigationFrame}
+      data-theme-surface
       aria-label={t("workbench.aria", { defaultValue: "Conversation workbench" })}
       className={cn(
         "thread-workspace relative flex h-full min-h-0 flex-col overflow-hidden bg-background",
@@ -690,7 +686,6 @@ export function PaneWorkbench({
           && "[--thread-header-position:relative]",
       )}
     >
-      <TooltipProvider>
         {chrome ? (
           <header className="pointer-events-none inset-x-0 top-0 z-30 shrink-0 [position:var(--thread-header-position,absolute)]">
             <div
@@ -699,9 +694,10 @@ export function PaneWorkbench({
             />
           </header>
         ) : null}
-        <div className="workbench-body relative min-h-0 flex-1 bg-background">
+        <div className="workbench-body relative min-h-0 flex-1">
           <div
             ref={gridRef}
+            data-theme-surface
             data-testid="pane-grid"
             data-layout={effectiveLayout}
             className={cn(
@@ -721,6 +717,7 @@ export function PaneWorkbench({
                     else paneRefs.current.delete(pane.key);
                   }}
                   aria-label={pane.title}
+                  data-theme-surface
                   data-active={active ? "true" : "false"}
                   data-dragging={draggingPaneKey === pane.key ? "true" : undefined}
                   data-testid={`workbench-pane-${pane.key}`}
@@ -735,11 +732,19 @@ export function PaneWorkbench({
                     // Multiple conversation panes still share the workbench toolbar.
                     headerPortalTarget: chrome && displayedPanes.length > 1 ? headerPortalTarget : undefined,
                     composerPortalTarget: chrome ? composerPortalTarget : undefined,
+                    // A single chat includes the shared composer in its visual frame.
+                    // Split chats keep navigation centered within their own pane.
+                    navigationFrame: displayedPanes.length === 1 ? navigationFrame : undefined,
                     headerActions,
                   })}
                   {chrome && panes.length > 1 && !compact ? (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
+                    <HoverHint
+                      enabled={active}
+                      side="top"
+                      content={t("workbench.movePaneHint", {
+                        defaultValue: "Drag to move, or use the arrow keys.",
+                      })}
+                    >
                         <button
                           type="button"
                           tabIndex={active ? 0 : -1}
@@ -772,15 +777,7 @@ export function PaneWorkbench({
                             )}
                           />
                         </button>
-                      </TooltipTrigger>
-                      {active ? (
-                        <TooltipContent side="top">
-                          {t("workbench.movePaneHint", {
-                            defaultValue: "Drag to move, or use the arrow keys.",
-                          })}
-                        </TooltipContent>
-                      ) : null}
-                    </Tooltip>
+                    </HoverHint>
                   ) : null}
                 </section>
               );
@@ -836,7 +833,7 @@ export function PaneWorkbench({
         </div>
 
         {chrome ? (
-          <footer className="workbench-composer-footer shrink-0 bg-background px-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] sm:px-4">
+          <footer className="workbench-composer-footer shrink-0 px-3 pb-[calc(0.5rem+env(safe-area-inset-bottom))] sm:px-4 sm:pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
             <div
               ref={setComposerPortalTarget}
               data-testid="workbench-composer-host"
@@ -844,7 +841,6 @@ export function PaneWorkbench({
             />
           </footer>
         ) : null}
-      </TooltipProvider>
     </section>
   );
 }

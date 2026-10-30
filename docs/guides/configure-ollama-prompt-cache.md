@@ -1,6 +1,6 @@
-# How to Improve Ollama Tool-Calling Prompt Cache Reuse in nanobot
+# Reuse Ollama Prompt Cache to Reduce Repeated Processing
 
-Some Ollama model templates move or remove tool definitions as a conversation switches between user, assistant, and tool messages. nanobot can send a correct append-only chat request while the model template still renders a different token prefix. On slower local hardware, re-evaluating that prefix can add tens of seconds to an otherwise simple tool-using turn.
+Ollama can reuse work from an earlier prompt when the beginning of the prompt stays the same. Some model templates move or remove tool instructions as a conversation switches between user, assistant, and tool messages, so Ollama must process much of the prompt again. On slower local hardware, this can add tens of seconds to a tool-using turn.
 
 This guide shows how to diagnose that specific pattern and create a derived `llama3.1:8b` tag with a prefix-stable tool template. It does not modify nanobot or overwrite the original Ollama model.
 
@@ -66,7 +66,7 @@ The cache is working, but the next main request can reuse only the shorter promp
 
 To inspect the API request bodies as well, add `OLLAMA_DEBUG_LOG_REQUESTS=1` before starting Ollama. These logs can contain system prompts, workspace context, and user messages. Keep them local and disable request logging after diagnosis.
 
-## Why this happens with the stock template
+## Why the default template can limit cache reuse
 
 The tested `llama3.1:8b` template conditionally expands the tool definitions inside a user message:
 
@@ -144,7 +144,14 @@ Ollama reuses the existing model layers. The new tag adds a small template and m
 
 ## Select the derived model in nanobot
 
-Merge this preset into `~/.nanobot/config.json` and select it:
+Open **Settings → Models → New preset**, select your Ollama connection, enter the derived model name, and save. Use **Enable preset** if it is disabled, then drag it to the first enabled position, marked **Primary**. This saves the default model used by sessions without their own model selection, including the fresh CLI session below.
+
+Run the CLI commands with the same nanobot home as the WebUI. If the WebUI uses a custom home, add `--home <path>` before each subcommand.
+
+<details>
+<summary>Manual configuration</summary>
+
+Merge this preset into your instance's `config.json` to make it the default:
 
 ```json
 {
@@ -170,7 +177,9 @@ Merge this preset into `~/.nanobot/config.json` and select it:
 }
 ```
 
-Verify the selected model and repeat the two-turn check:
+</details>
+
+Run `nanobot status` and confirm that **Model** shows `llama3.1:8b-prefix-stable-v1`, then repeat the two-turn check. If `cli:ollama-stable-check` already exists with a saved model selection, use a new session name for both turns.
 
 ```bash
 nanobot status
@@ -184,7 +193,16 @@ In one controlled test with Ollama 0.32.1, `llama3.1:8b`, and one slot, the seco
 
 ## Roll back
 
-Switch `agents.defaults.modelPreset` back to the original preset. When no config uses the derived tag, remove it with:
+In **Settings → Models**, move the original preset back to the first enabled position and disable the derived preset. For conversations with a saved model selection, select the original preset in the composer as well.
+
+<details>
+<summary>Manual configuration</summary>
+
+Set `agents.defaults.modelPreset` back to the original preset in your instance's `config.json`.
+
+</details>
+
+When no configuration or session uses the derived tag, remove it with:
 
 ```bash
 ollama rm llama3.1:8b-prefix-stable-v1
