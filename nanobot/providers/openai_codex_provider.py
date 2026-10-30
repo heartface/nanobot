@@ -1,5 +1,3 @@
-"""OpenAI Codex Responses Provider."""
-
 # pyright: reportMissingTypeStubs=false, reportPrivateUsage=false
 
 from __future__ import annotations
@@ -195,7 +193,6 @@ class OpenAICodexProvider(LLMProvider):
         await self._responses.aclose()
 
     def _ssl_context(self, *, verify: bool) -> ssl.SSLContext:
-        """Reuse synchronous TLS setup across requests on the shared event loop."""
         context = self._ssl_contexts.get(verify)
         if context is None:
             context = httpx.create_ssl_context(
@@ -218,7 +215,6 @@ class OpenAICodexProvider(LLMProvider):
         on_tool_call_delta: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         provider_context: ProviderCallContext | None = None,
     ) -> LLMResponse:
-        """Shared request logic for both chat() and chat_stream()."""
         model = model or self.default_model
         sanitized_messages = self._sanitize_empty_content(messages)
         sanitized_state = (
@@ -551,7 +547,6 @@ def _strip_model_prefix(model: str) -> str:
 
 
 def _build_reasoning_options(reasoning_effort: str | None) -> dict[str, str] | None:
-    """Opt in to visible summaries without changing provider-default effort."""
     if reasoning_effort and reasoning_effort.lower() == "none":
         return {"effort": "none"}
     options = {"summary": "auto"}
@@ -657,7 +652,6 @@ def _diagnostic_token(value: object) -> str | None:
 
 
 def _codex_error_details(raw: str) -> tuple[str | None, str | None]:
-    """Retain parameter paths and known enum errors without upstream prompt echoes."""
     try:
         payload = json.loads(raw)
     except ValueError:
@@ -686,7 +680,6 @@ def _codex_error_details(raw: str) -> tuple[str | None, str | None]:
 
 
 def _codex_error_response(exc: Exception) -> LLMResponse:
-    """Convert Codex transport/API failures into actionable, retryable metadata."""
     if isinstance(exc, RuntimeError) and _codex_login_required(exc):
         return LLMResponse(
             content="OpenAI Codex authorization expired. Please sign in again.",
@@ -746,7 +739,6 @@ def _codex_error_response(exc: Exception) -> LLMResponse:
 
 
 def _codex_log_summary(exc_type: str, response: LLMResponse) -> str:
-    """Return a bounded diagnostic summary without request body or raw upstream payload."""
     if response.error_status_code is not None:
         parts = [f"HTTP {response.error_status_code}"]
         if response.error_type:
