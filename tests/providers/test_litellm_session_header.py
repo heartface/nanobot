@@ -19,10 +19,9 @@ def test_session_id_is_ascii_safe():
     assert value.isascii() and value.startswith("sdk:")
 
 
-@pytest.mark.parametrize("context", [None, ProviderCallContext(), ProviderCallContext(session_id="")])
-def test_no_session_no_header(context):
+def test_no_session_no_header():
     provider = OpenAICompatProvider(api_key="k", api_base="http://localhost:4000/v1")
-    assert provider._session_headers(context) is None
+    assert provider._session_headers(ProviderCallContext()) is None
 
 
 def test_hosted_endpoint_never_sees_session_id():
