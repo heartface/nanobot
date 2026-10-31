@@ -15,7 +15,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from ipaddress import ip_address
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from loguru import logger
 
@@ -790,6 +790,18 @@ class OpenAICompatProvider(LLMProvider):
             return None
         session_key = hashlib.sha256(provider_context.session_id.encode("utf-8")).hexdigest()
         return {"x-opencode-session": session_key}
+
+    def _session_headers(
+        self,
+        provider_context: "ProviderCallContext | None",
+    ) -> dict[str, str] | None:
+        """Per-conversation headers: opencode affinity, plus a LiteLLM session id locally."""
+        headers = dict(self._opencode_affinity_headers(provider_context) or {})
+        # A local proxy such as LiteLLM groups its request logs by this header.
+        # Only sent to local endpoints, so hosted APIs never see chat ids.
+        if self._is_local and provider_context is not None and provider_context.session_id:
+            headers["x-litellm-session-id"] = quote(provider_context.session_id, safe=":-_.")
+        return headers or None
 
     def _build_kwargs(
         self,
@@ -1662,7 +1674,7 @@ class OpenAICompatProvider(LLMProvider):
         provider_context: ProviderCallContext | None = None,
     ) -> LLMResponse:
         client = await self._ensure_client()
-        affinity = self._opencode_affinity_headers(provider_context)
+        affinity = self._session_headers(provider_context)
         try:
             if self._should_use_responses_api(model, reasoning_effort):
                 try:
@@ -1714,7 +1726,7 @@ class OpenAICompatProvider(LLMProvider):
     ) -> LLMResponse:
         client = await self._ensure_client()
         idle_timeout_s = resolve_stream_idle_timeout_s()
-        affinity = self._opencode_affinity_headers(provider_context)
+        affinity = self._session_headers(provider_context)
         try:
             if self._should_use_responses_api(model, reasoning_effort):
                 try:
