@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeAlias, runtime_checkable
+from zoneinfo import ZoneInfo
 
 from nanobot.runtime_context import RuntimeContextBlock, wrap_runtime_context_lines
 from nanobot.security.workspace_access import (
@@ -203,6 +205,16 @@ class AgentRuntimeControl:
                 "Shell sandbox configured; extra binds do not grant file-tool access."
             )
         return RuntimeContextBlock(source="workspace_access", content=wrap_runtime_context_lines(lines))
+
+    async def current_time_context(self, request: RequestContext) -> RuntimeContextBlock:
+        """Tell the model the current date; history and summaries carry stale ones."""
+        tz_name = self.__target.context.timezone or "UTC"
+        try:
+            now = datetime.now(ZoneInfo(tz_name))
+        except Exception:
+            tz_name, now = "UTC", datetime.now(ZoneInfo("UTC"))
+        line = f"Current local time: {now:%A %Y-%m-%d %H:%M} ({tz_name})"
+        return RuntimeContextBlock(source="current_time", content=wrap_runtime_context_lines([line]))
 
     def snapshot(self) -> RuntimeSnapshot:
         target = self.__target
