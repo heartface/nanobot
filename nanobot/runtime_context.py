@@ -4,7 +4,9 @@ import json
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
+from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
     from nanobot.agent.tools.context import RequestContext
@@ -56,6 +58,13 @@ def wrap_runtime_context_lines(lines: Iterable[str]) -> str:
     if not content:
         return ""
     return f"{RUNTIME_CONTEXT_TAG}\n{content}\n{RUNTIME_CONTEXT_END}"
+
+
+async def current_time_context(timezone: str, request: RequestContext) -> RuntimeContextBlock:
+    """Tell the model the current local time; history and summaries carry stale dates."""
+    now = datetime.now(ZoneInfo(timezone))
+    line = f"Current local time: {now:%A %Y-%m-%d %H:%M} ({timezone})"
+    return RuntimeContextBlock(source="current_time", content=wrap_runtime_context_lines([line]))
 
 
 def webui_quote_runtime_context(metadata: Mapping[str, Any]) -> RuntimeContextBlock | None:

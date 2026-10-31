@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -13,6 +16,7 @@ from nanobot.runtime_context import (
     WEBUI_QUOTE_SOURCE,
     RuntimeContextBlock,
     append_runtime_context,
+    current_time_context,
     normalize_webui_quote,
     public_history_message,
     resolve_runtime_context,
@@ -47,6 +51,16 @@ async def test_resolve_runtime_context_preserves_provider_order() -> None:
         ("first", "one"),
         ("second", "two"),
     ]
+
+
+async def test_current_time_context_uses_configured_timezone() -> None:
+    zone = ZoneInfo("America/New_York")
+    with patch("nanobot.runtime_context.datetime") as clock:
+        clock.now.return_value = datetime(2026, 10, 31, 9, 29, tzinfo=zone)
+        block = await current_time_context("America/New_York", RequestContext("websocket", "chat"))
+    clock.now.assert_called_once_with(zone)
+    assert block.source == "current_time"
+    assert "Current local time: Saturday 2026-10-31 09:29 (America/New_York)" in block.content
 
 
 def test_webui_quote_is_bounded_and_projected_as_model_only_context() -> None:
