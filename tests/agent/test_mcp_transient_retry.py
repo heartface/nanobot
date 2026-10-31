@@ -191,20 +191,6 @@ async def test_tool_timeout_reconnects_for_next_call_without_retrying():
 
 
 @pytest.mark.asyncio
-async def test_tool_timeout_survives_reconnect_failure():
-    session = AsyncMock()
-    session.call_tool = AsyncMock(side_effect=asyncio.TimeoutError())
-
-    wrapper = MCPToolWrapper(session, "test_server", _make_tool_def(), tool_timeout=5)
-    wrapper.set_reconnect_handler(AsyncMock(side_effect=RuntimeError("down")))
-
-    output = await wrapper.execute()
-
-    assert "timed out" in output
-    assert wrapper._session is session
-
-
-@pytest.mark.asyncio
 async def test_tool_success_on_first_try_no_retry():
     """Normal success path — no retry logic involved."""
     session = AsyncMock()

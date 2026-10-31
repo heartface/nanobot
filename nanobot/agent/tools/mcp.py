@@ -557,17 +557,7 @@ class _MCPWrapperBase(Tool):
             self._name,
             self._server_name,
         )
-        try:
-            refreshed_tool = await self._reconnect(self._server_name, self._name, self)
-        except Exception as exc:
-            logger.warning(
-                "MCP {} '{}' could not reconnect server '{}' after timeout: {}",
-                capability_kind,
-                self._name,
-                self._server_name,
-                type(exc).__name__,
-            )
-            return
+        refreshed_tool = await self._reconnect(self._server_name, self._name, self)
         refreshed_session = getattr(refreshed_tool, "_session", None)
         if refreshed_session is not None:
             self._session = refreshed_session
