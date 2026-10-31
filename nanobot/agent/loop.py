@@ -660,6 +660,7 @@ class AgentLoop:
 
         runtime_control = AgentRuntimeControl(self)
         self.register_runtime_context_provider(runtime_control.workspace_context)
+        self.register_runtime_context_provider(runtime_control.current_time_context)
         self.register_runtime_context_provider(
             partial(turn_continuation.iteration_limit_context, self.sessions.state),
         )

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -452,6 +454,39 @@ async def test_workspace_context_keeps_path_delimiters_as_data(tmp_path: Path) -
     assert block.content.count(RUNTIME_CONTEXT_END) == 1
     path_json = block.content.splitlines()[1].split(": ", 1)[1]
     assert json.loads(path_json) == str(scope.project_path)
+
+
+@pytest.mark.asyncio
+async def test_current_time_context_uses_configured_timezone(tmp_path: Path) -> None:
+    loop = _make_loop(tmp_path)
+    loop.context.timezone = "America/New_York"
+    control = _my_tool(loop)._runtime_control
+    fixed = datetime(2026, 10, 31, 9, 29, tzinfo=ZoneInfo("America/New_York"))
+    with patch("nanobot.agent.tools.runtime_control.datetime") as clock:
+        clock.now.return_value = fixed
+        block = await control.current_time_context(RequestContext("websocket", "chat"))
+    clock.now.assert_called_once_with(ZoneInfo("America/New_York"))
+    assert block.source == "current_time"
+    assert "Current local time: Saturday 2026-10-31 09:29 (America/New_York)" in block.content
+
+
+@pytest.mark.asyncio
+async def test_current_time_context_falls_back_to_utc(tmp_path: Path) -> None:
+    loop = _make_loop(tmp_path)
+    loop.context.timezone = "Not/AZone"
+    block = await _my_tool(loop)._runtime_control.current_time_context(RequestContext("websocket", "chat"))
+    assert "(UTC)" in block.content
+
+
+@pytest.mark.asyncio
+async def test_current_time_reaches_the_model(tmp_path: Path) -> None:
+    loop = _make_loop(tmp_path)
+    provider = loop.provider
+    provider.generation = GenerationSettings()
+    provider.chat_stream_with_retry = AsyncMock(return_value=LLMResponse(content="done"))
+    await loop.process_direct("What day is it?", ephemeral=True)
+    message = provider.chat_stream_with_retry.await_args.kwargs["messages"][-1]
+    assert "Current local time: " in message["content"]
 
 
 @pytest.mark.asyncio

@@ -822,7 +822,7 @@ async def test_pending_injection_resolves_its_own_runtime_context(tmp_path):
     assert "telegram | group-1 | user-c | message-3" in str(model_messages)
     assert "Carol | topic-7" in str(model_messages)
     assert all(
-        message["_meta"][RUNTIME_CONTEXT_MESSAGE_META]["sources"] == ["workspace_access", "identity"]
+        message["_meta"][RUNTIME_CONTEXT_MESSAGE_META]["sources"] == ["workspace_access", "current_time", "identity"]
         for message in injected
     )
 
